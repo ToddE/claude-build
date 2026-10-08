@@ -6,7 +6,7 @@ Install it with the script in section 1, edit `claude-build.conf` (set `PROJECT_
 
 ## Who this is for
 
-claude-build suits one project with dependent steps that you want Claude Code to work through while you are away. You describe the work once, in a plan and a task table, and the script runs it in order on your branch, one bounded session at a time. It needs bash, git, and the `claude` command, and no scheduler, database, or Python environment.
+`claude-build` suits one project with dependent steps that you want Claude Code to work through while you are away. You describe the work once, in a plan and a task table, and the script runs it in order on your branch, one bounded session at a time. It needs bash, git, and the `claude` command, and no scheduler, database, or Python environment.
 
 It fits when:
 
@@ -28,6 +28,8 @@ The full path looks like this:
 4. **Review the table.** Edit models, effort, order, and the gate rows.
 5. **Build.** `claude-build -b` runs it in the background. Check progress with `-s`.
 
+[examples/PLAN.md](examples/PLAN.md) shows a plan in a structure that turns into a good table: a goal and scope, conventions, a document map, milestones with tasks that each name what to read, a check that proves they are done and a difficulty, review gates, and open decisions. Its task table is [examples/BUILD_STATE.md](examples/BUILD_STATE.md).
+
 claude-build works with any plan. A short `PLAN.md` you wrote by hand is enough to start.
 
 ## Why claude-build
@@ -35,7 +37,7 @@ claude-build works with any plan. A short `PLAN.md` you wrote by hand is enough 
 Long builds with Claude Code usually fail in the same few ways: the context fills up, a usage limit stops the session, or a task goes wrong and nobody notices until morning. claude-build handles each of these with plain bash and a Markdown state file.
 
 - **A small fresh context for every run.** Each run is one bounded `claude -p` session that does the next few tasks. A crash or usage limit costs at most one task, and the next run starts clean from the state file and git.
-- **The script chooses the model, and no model orchestrates.** You write the task table, or have one model draft it once with `--init` and edit the result. Each row names a model and an effort level. The script starts each run with those settings, so routine tasks use cheaper models and hard ones use Opus. [claude-build-state-example.md](claude-build-state-example.md) shows a task list set up this way.
+- **The script chooses the model, and no model orchestrates.** You write the task table, or have one model draft it once with `--init` and edit the result. Each row names a model and an effort level. The script starts each run with those settings, so routine tasks use cheaper models and hard ones use Opus. [examples/BUILD_STATE.md](examples/BUILD_STATE.md) shows a task list set up this way.
 - **Failures are handled for you.** A failed run waits 1, 2, 4, then 6 hours. A task that fails twice is handed to Opus at high effort with a written diagnosis. Two clean runs that finish nothing set the build to `blocked`, with a reason.
 - **Waiting costs nothing.** Sleeping and checking use no model, so an idle or finished build costs almost nothing.
 - **Designed to be left alone.** Unattended runs may use only the commands on an allowed list, with no push, deploy, or delete by default. One copy runs at a time, and every task is a commit you can revert.
@@ -80,7 +82,7 @@ The task table sets the model and effort level for each task. The script reads t
 
 You have two ways to get a state file:
 
-1. **Write it yourself.** Copy [claude-build-state-example.md](claude-build-state-example.md) into your project as `BUILD_STATE.md` and replace the rows with your tasks.
+1. **Write it yourself.** Copy [examples/BUILD_STATE.md](examples/BUILD_STATE.md) into your project as `BUILD_STATE.md` and replace the rows with your tasks.
 2. **Have a model draft it with `--init`.** Write your plan in any Markdown file (goals, requirements, the order you want things done), then run:
 
 ```
@@ -512,13 +514,13 @@ BLOCKED_REASON:
 | `BLOCKED_REASON:` | Filled in when `STATUS` is `blocked` |
 | Task table | A Markdown table whose header has `Id` and `Status` columns. `Status` is `todo`, `doing`, or `done`. Optional `Model` and `Effort` columns say which model and effort level each task should use (below). `Task`, `Milestone`, and `Commit` are shown by `-s` when present. Other columns are ignored |
 
-A complete example with models, effort levels, batching, and a gate is in [claude-build-state-example.md](claude-build-state-example.md). Copy it into your project as `BUILD_STATE.md` and replace the rows. A task row is all the model sees besides the context files and the repository, so each row should say what to read and how to check the result.
+A complete example with models, effort levels, batching, and a gate is in [examples/BUILD_STATE.md](examples/BUILD_STATE.md), built from the plan in [examples/PLAN.md](examples/PLAN.md). Copy it into your project as `BUILD_STATE.md` and replace the rows. A task row is all the model sees besides the context files and the repository, so each row should say what to read and how to check the result.
 
 Each run updates the table and `NEXT`, and commits, after every task. To change what happens next, edit the file: set a row back to `todo`, add rows, or change `NEXT`.
 
 ## 5. The config file
 
-`claude-build.conf` is read as shell: `KEY=value` lines and arrays. It is run, so only trust your own. Order of precedence: built-in default, then this file, then flags. Which file is used: `-c`, else `claude-build.conf` in the folder you are in, else the one beside the script. It must be owned by you and not writable by everyone. For a new project, copy `claude-build-conf-example.conf`, a complete template that documents every setting, lists the other values each can take, and ends with ready-made recipes (cautious, documentation, overnight, patient backoff, long prompt, two builds in one project). `claude-build.conf` in this folder is the working file for this project. The shipped working file documents every setting in place: what it does, where the file or folder it names is stored, its default, and the flag that overrides it. The table below is a summary.
+`claude-build.conf` is read as shell: `KEY=value` lines and arrays. It is run, so only trust your own. Order of precedence: built-in default, then this file, then flags. Which file is used: `-c`, else `claude-build.conf` in the folder you are in, else the one beside the script. It must be owned by you and not writable by everyone. For a new project, copy [`examples/claude-build.conf`](examples/claude-build.conf), a complete template that documents every setting, lists the other values each can take, and ends with ready-made recipes (cautious, documentation, overnight, patient backoff, long prompt, two builds in one project). `claude-build.conf` in this folder is the working file for this project. The shipped working file documents every setting in place: what it does, where the file or folder it names is stored, its default, and the flag that overrides it. The table below is a summary.
 
 | Key | Default | Meaning |
 | --- | --- | --- |

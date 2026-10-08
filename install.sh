@@ -47,8 +47,10 @@ head -n 1 "$DEST/claude-build.sh.tmp" | grep -q '^#!.*bash' || die "downloaded f
 bash -n "$DEST/claude-build.sh.tmp" || die "downloaded script has a syntax error"
 mv "$DEST/claude-build.sh.tmp" "$DEST/claude-build.sh"
 chmod +x "$DEST/claude-build.sh"
-get "$RAW/claude-build-conf-example.conf" > "$DEST/claude-build-conf-example.conf" 2>/dev/null || info "warning: could not fetch claude-build-conf-example.conf"
-get "$RAW/claude-build-state-example.md" > "$DEST/claude-build-state-example.md" 2>/dev/null || info "warning: could not fetch claude-build-state-example.md"
+mkdir -p "$DEST/examples"
+for f in claude-build.conf BUILD_STATE.md PLAN.md; do
+  get "$RAW/examples/$f" > "$DEST/examples/$f" 2>/dev/null || info "warning: could not fetch examples/$f"
+done
 get "$RAW/README.md" > "$DEST/README.md" 2>/dev/null || true
 
 # Point the command at this version. The script finds its config beside the real file,
@@ -58,4 +60,4 @@ if [ -f "$SHARE_DIR/claude-build.conf" ]; then ln -sfn "$SHARE_DIR/claude-build.
 
 info "installed $("$BIN_DIR/claude-build" --version 2>/dev/null || echo "$REF") at $BIN_DIR/claude-build"
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) info "add $BIN_DIR to your PATH, for example: export PATH=\"$BIN_DIR:\$PATH\"" ;; esac
-info "next: run claude-build with no arguments for the help. Templates are in $DEST: claude-build-conf-example.conf and claude-build-state-example.md"
+info "next: run claude-build with no arguments for the help. Examples (config, state file, plan) are in $DEST/examples"

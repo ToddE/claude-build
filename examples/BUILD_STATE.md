@@ -1,15 +1,15 @@
 # Build state
 
 <!--
-Example state file for claude-build. Copy it into your project as BUILD_STATE.md and
-replace the rows with your own tasks. The script reads STATUS, NEXT, and the task table.
+Example state file for claude-build. It is the task table for the plan in PLAN.md in this
+folder. Copy it into your project as BUILD_STATE.md and replace the rows with your own tasks. The script reads STATUS, NEXT, and the task table.
 Everything else, including this comment, is for people.
 
 How to read the table
   Id      Unique. Tasks run in table order, starting at NEXT.
   Task    What to do and what "done" looks like. The model gets only this row, the files
           listed in CONTEXT_FILES (or -i), and the repository. Say which file to read
-          (for example "see docs/plan.md, section 3") and how to check the result
+          (for example "see PLAN.md, section 4") and how to check the result
           (for example "npm test passes").
   Model   sonnet, opus, or haiku. The script starts the run with this model. Leave it
           empty to use MODEL from the config.
@@ -36,14 +36,14 @@ BLOCKED_REASON:
 
 | Id | Milestone | Task | Model | Effort | Status | Commit | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1.1 | M1 Scaffold | Create the package layout from docs/plan.md section 2. `npm test` runs and reports zero tests | haiku | | todo | | |
-| 1.2 | M1 Scaffold | Add lint and format config from docs/style.md. `npm run lint` passes | haiku | | todo | | |
-| 1.3 | M1 Scaffold | Add a CI workflow that runs lint and test. See .github/workflows/ci.yml in docs/plan.md section 4 | sonnet | | todo | | |
-| 1.4 | M2 Core | Design the link-checker module interface. Write the types and a one-page design note in docs/design.md. No implementation yet | opus | high | todo | | |
+| 1.1 | M1 Scaffold | Create the package layout from PLAN.md section 2. `npm test` runs and reports zero tests | haiku | | todo | | |
+| 1.2 | M1 Scaffold | Add lint and format config from docs/style.md (PLAN.md section 2). `npm run lint` passes | haiku | | todo | | |
+| 1.3 | M1 Scaffold | Add a CI workflow that runs lint and test (PLAN.md section 2, M1). Done when .github/workflows/ci.yml exists and runs both | sonnet | | todo | | |
+| 1.4 | M2 Core | Design the link-checker module interface from docs/use-cases.md UC-1 and UC-2. Write the types and a design note in docs/design.md that lists every exported function. No implementation yet | opus | high | todo | | |
 | 1.5 | M2 Core | Implement URL extraction from Markdown to match docs/design.md. Unit tests for inline, reference, and autolinks | sonnet | | todo | | |
 | 1.6 | M2 Core | Implement the HTTP checker with retries and a per-host rate limit. Unit tests use a local test server | sonnet | medium | todo | | |
 | 1.7 | M2 Core | Find and fix the race in concurrent checks of the same host (see the failing test in test/race.test.js) | opus | xhigh | todo | | |
 | 1.8 | Review | GATE. Stop after 1.7 for a human review of docs/design.md and the core module | | | todo | | |
-| 2.1 | M3 CLI | Add the command-line interface from docs/plan.md section 5. `--help` text matches the plan | sonnet | | todo | | |
+| 2.1 | M3 CLI | Add the command-line interface (PLAN.md M3; docs/use-cases.md UC-3, UC-4). `--help` text matches UC-3 and the CLI tests pass | sonnet | | todo | | |
 | 2.2 | M3 CLI | Write README usage examples. Run each example and paste the real output | sonnet | low | todo | | |
 | 2.3 | M3 CLI | Fix typos and wording in README.md and docs/. Do not change code | haiku | | todo | | |
