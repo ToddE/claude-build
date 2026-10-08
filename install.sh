@@ -33,6 +33,7 @@ get() {
 missing=""
 for t in git setsid timeout readlink stat awk sed; do command -v "$t" >/dev/null 2>&1 || missing="$missing $t"; done
 [ -n "$missing" ] && info "warning: missing tools:$missing"
+command -v jq >/dev/null 2>&1 || info "note: jq is not installed. claude-build still works, but shows progress only when each run ends. Install jq for live progress"
 command -v claude >/dev/null 2>&1 || info "warning: the claude command was not found on PATH. Install Claude Code before running a build"
 
 # Pick a version: the latest release tag, else main.

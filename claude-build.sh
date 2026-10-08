@@ -40,10 +40,11 @@ AFTER_RUN=30           # seconds to wait after a good run
 BACKOFF_STEPS=(3600 7200 14400 21600)   # waits after the 1st, 2nd, 3rd, 4th and later failures
 LOG_DIR=".build"
 REQUIRE_GIT=1
+STREAM=1               # 1 = log and show progress while a run works (needs jq). 0 = output appears when the run ends
 REDACT_FILES=(".env.local")
 CONFIG=""              # chosen below: -c, else ./claude-build.conf in the current folder, else the one beside this script
 CONFIG_GIVEN=0
-ONCE=0; RUN=0; VIEW=0; BACKGROUND=0; STOPIT=0; VERBOSE=0; INIT=0; ASK=0; GUIDE=0; CHECK_UPDATE=0; UPDATE=0; POSITIONAL=()   # VIEW = status-only mode (-s), INIT = plan mode (--init), ASK = interactive plan mode (-I)
+ONCE=0; RUN=0; VIEW=0; BACKGROUND=0; STOPIT=0; VERBOSE=0; INIT=0; ASK=0; GUIDE=0; WATCH=0; CHECK_UPDATE=0; UPDATE=0; POSITIONAL=()   # VIEW = status-only mode (-s), INIT = plan mode (--init), ASK = interactive plan mode (-I)
 
 # Bundled short flags: -rv is -r -v, and -vrc FILE is -v -r -c FILE. Letters that take a value must come last in a bundle.
 expand_flags() {
@@ -78,6 +79,7 @@ MODES
   no arguments        this help
   flags, no -r/-b/-o/-s   PREVIEW: shows the project, settings, and the exact prompt. Starts nothing
   -s                  status: print the last state and the end of the log (works after the build ended)
+  --watch             status that refreshes every 5 seconds (WATCH_EVERY) until Ctrl+C. Run it in a second terminal
   -r                  really run, in this terminal. Quiet: a line per step
   -b                  really run, in the background, then return to the terminal
   -o                  run one cycle, then exit (for cron or a timer)
@@ -149,6 +151,7 @@ FLAGS  (a flag overrides the config file, which overrides the built-in default)
   -a, --after-run SECONDS    wait after a good run             [$AFTER_RUN]
   -l, --log-dir DIR          logs, lock, and stop file         [$LOG_DIR]
   -h, --help                 show this text
+      --watch                like -s, redrawn every 5 seconds until Ctrl+C
       --guide                interactive help from Claude (asks before using tokens)
       --check-update         check GitHub for a newer release (the script never checks on its own)
       --update               install the newest release, after asking
@@ -275,6 +278,7 @@ while [ $# -gt 0 ]; do
     -h|--help) usage; exit 0 ;;
     --init) INIT=1; shift ;;
     --guide) GUIDE=1; shift ;;
+    --watch) VIEW=1; WATCH=1; shift ;;
     --check-update) CHECK_UPDATE=1; shift ;;
     --update) UPDATE=1; shift ;;
     -I|--interactive) ASK=1; shift ;;
@@ -338,7 +342,7 @@ else
   cd "$PROJECT_DIR" || exit 64
   [ -f "$STATE_FILE" ] || [ $INIT -eq 1 ] || { echo "state file not found: $STATE_FILE (looked in $(pwd)). It needs STATUS, NEXT, and a task table. See README.md, section 4. To have a model draft one from your plan: $NAME --init PLAN.md. Stuck? Run: $NAME --guide"; exit 64; }
 fi
-LOG="$LOG_DIR/build.log"; LOCK="$LOG_DIR/build.lock"; BACKOFF="$LOG_DIR/backoff_until"; FAILS="$LOG_DIR/failures"; STOP="$LOG_DIR/stop"
+LOG="$LOG_DIR/build.log"; LOCK="$LOG_DIR/build.lock"; BACKOFF="$LOG_DIR/backoff_until"; FAILS="$LOG_DIR/failures"; STOP="$LOG_DIR/stop"; CURRENT="$LOG_DIR/current_run"
 
 proj_path() { case "$1" in /*) printf %s "$1" ;; *) printf %s "$PWD/$1" ;; esac; }   # absolute path for a project-relative one
 stamp() { date '+%H:%M:%S'; }
@@ -426,7 +430,8 @@ build_prompt() {
 }
 
 claude_args() {
-  printf '%s\0' -p "$(build_prompt)" --model "$RUN_MODEL" --permission-mode "$PERMISSION_MODE" --output-format text
+  printf '%s\0' -p "$(build_prompt)" --model "$RUN_MODEL" --permission-mode "$PERMISSION_MODE" --output-format "${OUT_FORMAT:-text}"
+  [ "${OUT_FORMAT:-text}" = stream-json ] && printf '%s\0' --verbose
   [ -n "$RUN_EFFORT" ] && printf '%s\0' --effort "$RUN_EFFORT"
   [ ${#ALLOWED_TOOLS[@]} -gt 0 ] && { printf '%s\0' --allowedTools; printf '%s\0' "${ALLOWED_TOOLS[@]}"; }
   [ ${#EXTRA_CLAUDE_ARGS[@]} -gt 0 ] && printf '%s\0' "${EXTRA_CLAUDE_ARGS[@]}"
@@ -614,15 +619,30 @@ show_state() {
   nrow=$(state_table | awk -F'|' -v id="$next" 'function trim(s){gsub(/^[ \t]+|[ \t]+$/,"",s);return s} /^\|[ \t]*Id[ \t]*\|/{for(i=2;i<NF;i++)if(tolower(trim($i))=="task")tc=i;h=1;next} h&&trim($2)==id{print trim($tc);exit}' | show_cell)
   echo "  next:       ${next:--}${nrow:+  $nrow}"
   plan_run "$next"; echo "  next run:   on $RUN_MODEL, effort ${RUN_EFFORT:-default}"
+  if [ -f "$CURRENT" ] && alive "$LOCK" claude-build; then
+    local cs cn cm ce el; IFS='|' read -r cs cn cm ce < "$CURRENT"; el=$(( $(date +%s) - cs ))
+    echo "  this run:   task $cn on $cm, effort $ce, running for $(( el/60 ))m $(printf '%02d' $(( el%60 )))s"
+  fi
   echo "  tasks:      $done_n of $total done"
+  if [ -d .git ]; then echo "  changes:    $(git status --short 2>/dev/null | wc -l) uncommitted files. Last commit: $(git log -1 --format='%h %s' 2>/dev/null | cut -c1-70)"; fi
   table_warnings | sed 's/^/  /'
   rd=$(recent_done 5); if [ -n "$rd" ]; then echo "  recent:"; while IFS='|' read -r i t; do echo "    $i  $t"; done <<< "$rd"; fi
   echo; echo "log, last 15 lines ($(proj_path "$LOG")):"
   if [ -f "$LOG" ]; then tail -n 15 "$LOG" | redact_log | sed 's/^/  /'; else echo "  no log yet"; fi
   echo; echo "follow it live: tail -f $(proj_path "$LOG")"
 }
-# -s: print the report and exit.
-if [ $VIEW -eq 1 ]; then show_state; exit 0; fi
+# -s: print the report and exit. --watch: redraw it every few seconds until Ctrl+C.
+if [ $VIEW -eq 1 ]; then
+  if [ $WATCH -eq 1 ]; then
+    [ -t 1 ] || { echo "--watch needs a terminal."; exit 64; }
+    trap 'printf "\033[?25h\n"; exit 0' INT TERM; printf '\033[?25l\033[2J'
+    while true; do
+      printf '\033[H'; show_state; echo; echo "updated $(date '+%H:%M:%S'), every ${WATCH_EVERY:-5}s. Ctrl+C to quit"; printf '\033[J'
+      sleep "${WATCH_EVERY:-5}"
+    done
+  fi
+  show_state; exit 0
+fi
 
 # ---------- preview (flags without -r, -b, or -o) ----------
 if [ $RUN -eq 0 ] && [ $ONCE -eq 0 ] && [ $BACKGROUND -eq 0 ]; then
@@ -634,6 +654,7 @@ if [ $RUN -eq 0 ] && [ $ONCE -eq 0 ] && [ $BACKGROUND -eq 0 ]; then
   echo "model:     $([ "$MODEL_FROM_STATE" -eq 1 ] && echo "from each task's Model column, fallback $MODEL" || echo "$MODEL for every run (fixed)")"
   echo "effort:    $([ "$EFFORT_FROM_STATE" -eq 1 ] && echo "from each task's Effort column, else by model ($(echo "${EFFORT_DEFAULTS[*]}"))" || echo "${EFFORT:-Claude Code default} for every run (fixed)")"
   echo "next run:  task $(state NEXT) on $RUN_MODEL, effort ${RUN_EFFORT:-default}"
+  echo "progress:  $([ "$STREAM" -eq 1 ] && command -v jq >/dev/null 2>&1 && echo "live, one line per step, in the log$([ $VERBOSE -eq 1 ] && echo " and this terminal")" || echo "output appears when each run ends (install jq for live progress, STREAM=1)")"
   echo "context:   ${CONTEXT_FILES[*]:-none}"
   for c in "${CONTEXT_FILES[@]+"${CONTEXT_FILES[@]}"}"; do [ -e "$c" ] || echo "  warning: context path not found: $c"; done
   echo "allowed:   ${ALLOWED_TOOLS[*]}"; echo "prompt:"; build_prompt | fold -s -w 100 | sed 's/^/  /'; echo
@@ -666,21 +687,46 @@ if [ $VERBOSE -eq 1 ]; then show_state; echo; fi
 mkdir -p "$LOG_DIR"
 if alive "$LOCK" claude-build; then echo "already running (pid $(cat "$LOCK"))"; exit 0; fi
 echo $$ > "$LOCK"
-cleanup() { rm -f "$LOCK"; log_msg "stopped"; }
+cleanup() { rm -f "$LOCK" "$CURRENT"; log_msg "stopped"; }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 rm -f "$STOP"
+
+# Turns Claude's stream-json lines into one readable line per step: what the model says, and each tool it uses.
+progress_lines() {
+  jq -Rr --unbuffered '
+    (now | localtime | strftime("%H:%M:%S")) as $t
+    | (. as $raw | try fromjson catch $raw) as $e
+    | if ($e | type) == "string" then $t + " " + $e
+      elif $e.type == "assistant" then
+        $e.message.content[]?
+        | if .type == "text" then $t + " claude: " + (.text | gsub("\\s+"; " ") | .[0:400])
+          elif .type == "tool_use" then $t + "   " + .name + ": " + ((.input.command // .input.file_path // .input.pattern // .input.path // "") | tostring | gsub("\\s+"; " ") | .[0:160])
+          else empty end
+      elif $e.type == "result" then $t + " run result: " + ($e.subtype // "") + ", " + (($e.num_turns // 0) | tostring) + " turns, $" + ((($e.total_cost_usd // 0) * 10000 | round / 10000) | tostring) + (if $e.is_error then " (error: " + (($e.result // "") | .[0:200]) + ")" else "" end)
+      else empty end'
+}
 
 # One bounded model run. Returns 0 if it finished, 1 if the build cannot start, anything else if it failed.
 resume_build() {
   if [ "$REQUIRE_GIT" -eq 1 ] && [ ! -d .git ]; then log_msg "cannot run: run git init first so each task is checkpointed"; return 1; fi
   local -a cmd=(); while IFS= read -r -d '' a; do cmd+=("$a"); done < <(claude_args)
   local code
-  if [ $VERBOSE -eq 1 ]; then   # verbose: show the model's output live as well as logging it
+  echo "$(date +%s)|$(state NEXT)|$RUN_MODEL|${RUN_EFFORT:-default}" > "$CURRENT"
+  if [ "$STREAM" -eq 1 ] && command -v jq >/dev/null 2>&1; then
+    # Progress while the run works. The raw stream is kept in LOG_DIR/last-run.jsonl.
+    OUT_FORMAT=stream-json; cmd=(); while IFS= read -r -d '' a; do cmd+=("$a"); done < <(claude_args)
+    if [ $VERBOSE -eq 1 ]; then
+      timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" 2>&1 | tee "$LOG_DIR/last-run.jsonl" | progress_lines | tee -a "$LOG"; code=${PIPESTATUS[0]}
+    else
+      timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" 2>&1 | tee "$LOG_DIR/last-run.jsonl" | progress_lines >> "$LOG"; code=${PIPESTATUS[0]}
+    fi
+  elif [ $VERBOSE -eq 1 ]; then   # no jq: the output appears when the run ends
     timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" 2>&1 | tee -a "$LOG"; code=${PIPESTATUS[0]}
   else
     timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" >> "$LOG" 2>&1; code=$?
   fi
+  rm -f "$CURRENT"
   if [ $code -ne 0 ]; then
     local n=$(( $(cat "$FAILS" 2>/dev/null || echo 0) + 1 )) idx wait
     echo $n > "$FAILS"; idx=$(( n-1 )); [ $idx -ge ${#BACKOFF_STEPS[@]} ] && idx=$(( ${#BACKOFF_STEPS[@]} - 1 ))

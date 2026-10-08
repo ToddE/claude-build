@@ -154,6 +154,7 @@ It uses tokens, so before it starts it shows the model, an estimate of the start
 | `claude` (Claude Code), logged in | Each run is a `claude -p` session |
 | `git` | The project must be a git repository. Each task is committed |
 | `setsid`, `timeout`, `readlink`, `stat`, `awk`, `sed` | Standard on Linux (util-linux and coreutils). On macOS, install coreutils and util-linux with Homebrew |
+| `jq` (optional) | Live progress while a run works (see `-v`). Without it, output appears when each run ends |
 | `curl` or `wget` | Only for the install script |
 
 ### Install
@@ -336,7 +337,7 @@ claude-build -c ~/builds/blog.conf -s
 `-s` stands alone. Combining it with `-r`, `-b`, or `-o` is an error.
 
 #### `-v`, `--verbose`
-A modifier, not a mode. With a preview, `-v` prints the state report before the settings and prompt. With `-r` or `-o`, it prints the state report first and shows the model's output live in the terminal as well as logging it. With `-b` it prints the state report before backgrounding. The background copy itself does not echo the model's output. Follow it with `tail -f`.
+A modifier, not a mode. With a preview, `-v` prints the state report before the settings and prompt. With `-r` or `-o`, it prints the state report first and shows progress in the terminal as the run works, one line per step: what the model says and each tool it uses, with a time. The same lines are written to the log in every mode, so `tail -f .build/build.log` follows a run even without `-v`. This needs `jq`. Without `jq`, the model's output appears only when each run ends. The raw stream of the latest run is kept in `.build/last-run.jsonl`. Set `STREAM=0` in the config to turn live progress off. With `-b` the state report is printed before backgrounding, and the background copy does not echo to the terminal. Follow it with `tail -f`.
 ```
 claude-build -v -c blog.conf                  verbose preview
 claude-build -v -c blog.conf -r               verbose run
