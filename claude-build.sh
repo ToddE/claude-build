@@ -348,22 +348,33 @@ self_cmd() { local c="$SCRIPT_PATH"; [ "$(readlink -f "$(command -v "$NAME" 2>/d
 # Checking the command line stops a reused pid (after a reboot or crash) from being mistaken for ours or signalled by -k.
 alive() { local pid; [ -f "$1" ] && pid=$(cat "$1") && [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q -- "$2"; }
 
+# The task table is split on "|", so a literal | inside a cell must be written \| . This reads the table with \| turned into a placeholder (\001); show_cell turns it back.
+state_table() { sed 's/\\|/\x01/g' "$STATE_FILE"; }
+show_cell() { tr '\001' '|'; }
+# Prints a warning for each task row whose cell count differs from the header (usually a | inside a cell).
+table_warnings() {
+  state_table | awk -F'|' '
+    !hdr && /^\|[ \t]*Id[ \t]*\|/ { n=NF; hdr=1; next }
+    hdr && /^\|[ \t:-]+\|/ && !seen { seen=1; next }
+    hdr && /^\|/ { id=$2; gsub(/^[ \t]+|[ \t]+$/,"",id); if (NF!=n) printf "warning: task %s has %d cells but the header has %d. Write a | inside a cell as \\|\n", id, NF-2, n-2; next }
+    hdr && !/^\|/ { exit }'
+}
 # Counts rows of the task table in the state file: prints "done total". The table needs a header with Id and Status columns.
 task_counts() {
-  awk -F'|' '
+  state_table | awk -F'|' '
     function trim(s){gsub(/^[ \t]+|[ \t]+$/,"",s);return s}
     !hdr && /^\|[ \t]*Id[ \t]*\|/ { for(i=2;i<NF;i++) if (tolower(trim($i))=="status") sc=i; hdr=1; next }
     hdr && /^\|[ \t:-]+\|/ && !seen { seen=1; next }
     hdr && /^\|/ { if (trim($2)!="") { t++; if (tolower(trim($sc))=="done") d++ } next }
     hdr && !/^\|/ { exit }
-    END { printf "%d %d", d+0, t+0 }' "$STATE_FILE"
+    END { printf "%d %d", d+0, t+0 }'
 }
 # Prints one cell of the task row whose Id is $1, from the column named $2 (empty if the column or row is missing).
 task_cell() {
-  awk -F'|' -v id="$1" -v col="$2" '
+  state_table | awk -F'|' -v id="$1" -v col="$2" '
     function trim(s){gsub(/^[ \t]+|[ \t]+$/,"",s);return s}
     !h && /^\|[ \t]*Id[ \t]*\|/ { for(i=2;i<NF;i++) if (tolower(trim($i))==tolower(col)) c=i; h=1; next }
-    h && c && trim($2)==id { print trim($c); exit }' "$STATE_FILE"
+    h && c && trim($2)==id { print trim($c); exit }' | show_cell
 }
 # Decide the model and effort for the run that starts at task $1. Sets RUN_MODEL, RUN_EFFORT, RUN_FROM_STATE.
 plan_run() {
@@ -382,13 +393,13 @@ plan_run() {
 }
 # Prints "id|task" for the n most recently finished tasks (last rows marked done), newest first.
 recent_done() {
-  awk -F'|' -v n="$1" '
+  state_table | awk -F'|' -v n="$1" '
     function trim(s){gsub(/^[ \t]+|[ \t]+$/,"",s);return s}
     !hdr && /^\|[ \t]*Id[ \t]*\|/ { for(i=2;i<NF;i++){c=tolower(trim($i)); if(c=="status")sc=i; if(c=="task")tc=i}; hdr=1; next }
     hdr && /^\|[ \t:-]+\|/ && !seen { seen=1; next }
     hdr && /^\|/ { if (tolower(trim($sc))=="done") { k++; id[k]=trim($2); tk[k]=trim($tc) } next }
     hdr && !/^\|/ { exit }
-    END { for (i=k; i>0 && i>k-n; i--) printf "%s|%s\n", id[i], tk[i] }' "$STATE_FILE"
+    END { for (i=k; i>0 && i>k-n; i--) printf "%s|%s\n", id[i], tk[i] }' | show_cell
 }
 # Replace any value from the REDACT_FILES with [hidden] in the lines read from stdin.
 redact_log() {
@@ -446,6 +457,7 @@ Rules:
 - Put tasks that use the same model next to each other when the order allows, because one session handles consecutive tasks that name the same model.
 - Add a row whose Task begins with GATE after each milestone. Leave its Model and Effort empty. A session that reaches it sets STATUS to gate and stops for a person to review.
 - Ids are unique and increase in the order the tasks run.
+- Never put a | inside a cell. If a command needs one, write \\| instead.
 
 Questions:
 END_OF_INIT
@@ -598,10 +610,11 @@ show_state() {
   if alive "$LOCK" claude-build; then echo "  build loop: running (pid $(cat "$LOCK"))"; else echo "  build loop: not running"; fi
   echo "  status:     ${status:-unknown}${reason:+ ($reason)}"
   if [ -f "$BACKOFF" ] && [ "$(date +%s)" -lt "$(cat "$BACKOFF")" ]; then echo "  waiting:    until $(date -d @"$(cat "$BACKOFF")" '+%H:%M') after a failed run"; fi
-  nrow=$(awk -F'|' -v id="$next" 'function trim(s){gsub(/^[ \t]+|[ \t]+$/,"",s);return s} /^\|[ \t]*Id[ \t]*\|/{for(i=2;i<NF;i++)if(tolower(trim($i))=="task")tc=i;h=1;next} h&&trim($2)==id{print trim($tc);exit}' "$STATE_FILE")
+  nrow=$(state_table | awk -F'|' -v id="$next" 'function trim(s){gsub(/^[ \t]+|[ \t]+$/,"",s);return s} /^\|[ \t]*Id[ \t]*\|/{for(i=2;i<NF;i++)if(tolower(trim($i))=="task")tc=i;h=1;next} h&&trim($2)==id{print trim($tc);exit}' | show_cell)
   echo "  next:       ${next:--}${nrow:+  $nrow}"
   plan_run "$next"; echo "  next run:   on $RUN_MODEL, effort ${RUN_EFFORT:-default}"
   echo "  tasks:      $done_n of $total done"
+  table_warnings | sed 's/^/  /'
   rd=$(recent_done 5); if [ -n "$rd" ]; then echo "  recent:"; while IFS='|' read -r i t; do echo "    $i  $t"; done <<< "$rd"; fi
   echo; echo "log, last 15 lines ($(proj_path "$LOG")):"
   if [ -f "$LOG" ]; then tail -n 15 "$LOG" | redact_log | sed 's/^/  /'; else echo "  no log yet"; fi
@@ -614,6 +627,7 @@ if [ $VIEW -eq 1 ]; then show_state; exit 0; fi
 if [ $RUN -eq 0 ] && [ $ONCE -eq 0 ] && [ $BACKGROUND -eq 0 ]; then
   if [ $VERBOSE -eq 1 ]; then show_state; echo; fi
   echo "PREVIEW ONLY. Nothing was started."; echo "config:    $CONFIG_USED"; echo "project:   $(pwd)"; echo "state:     $STATE_FILE   ($(task_counts) done/total)"
+  table_warnings
   plan_run "$(state NEXT)"
   echo "settings:  mode=$PERMISSION_MODE tasks/run=$TASKS_PER_RUN timeout=$TIMEOUT interval=${INTERVAL}s after-run=${AFTER_RUN}s"
   echo "model:     $([ "$MODEL_FROM_STATE" -eq 1 ] && echo "from each task's Model column, fallback $MODEL" || echo "$MODEL for every run (fixed)")"

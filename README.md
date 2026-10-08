@@ -22,7 +22,7 @@ If you have many independent tasks that should each end on their own branch for 
 
 The quality of the build follows the quality of the plan. A build that starts from a clear plan needs fewer retries and less rework. If you do not have one yet, the [claude-skills](https://github.com/ToddE/claude-skills) project is a companion for that step. Its product-management skills take an idea through a Working Backwards PR/FAQ, use case discovery, full use cases, test cases, functional requirements, and an architecture review. Those documents are a good source for a `PLAN.md`.
 
-The full path looks like this:
+The full path with claude-skills looks like this:
 
 1. **Plan with claude-skills.** Produce the use cases, requirements, and test cases for your project.
 2. **Collect them in a `PLAN.md`.** Summarize the goals, the order of work, and where each detailed document lives.
@@ -83,8 +83,11 @@ The idea of calling `claude -p` in a loop with progress kept in files and git is
 
 The task table sets the model and effort level for each task. The script reads those cells and starts each run with them. During a build it never asks a model to choose.
 
-You have two ways to get a state file:
+The preferred way is the `build-plan` skill from [claude-skills](https://github.com/ToddE/claude-skills) (in `product-management/skills/build-plan`). It takes the use cases, requirements, test cases, and architecture review that the other skills produce and writes `BUILD_STATE.md`, `claude-build.conf`, `CLAUDE.md`, a build plan, and an engineering prompt, with a model and effort for each task, gates, stop conditions, and a coverage check that every requirement has a task. It asks its questions while you can answer them. Use it when you can. The two ways below are for smaller projects or when you do not have those documents.
 
+You have three ways to get a state file:
+
+0. **Use the `build-plan` skill** (preferred, described above).
 1. **Write it yourself.** Copy [examples/BUILD_STATE.md](examples/BUILD_STATE.md) into your project as `BUILD_STATE.md` and replace the rows with your tasks.
 2. **Have a model draft it with `--init`.** Write your plan in any Markdown file (goals, requirements, the order you want things done), then run:
 
@@ -535,6 +538,8 @@ BLOCKED_REASON:
 | Task table | A Markdown table whose header has `Id` and `Status` columns. `Status` is `todo`, `doing`, or `done`. Optional `Model` and `Effort` columns say which model and effort level each task should use (below). `Task`, `Milestone`, and `Commit` are shown by `-s` when present. Other columns are ignored |
 
 A complete example with models, effort levels, batching, and a gate is in [examples/BUILD_STATE.md](examples/BUILD_STATE.md), built from the plan in [examples/PLAN.md](examples/PLAN.md). Copy it into your project as `BUILD_STATE.md` and replace the rows. A task row is all the model sees besides the context files and the repository, so each row should say what to read and how to check the result.
+
+A literal `|` inside a cell must be written `\|`, because the table is split on `|`. The preview and `-s` warn about a row whose cell count differs from the header.
 
 Each run updates the table and `NEXT`, and commits, after every task. To change what happens next, edit the file: set a row back to `todo`, add rows, or change `NEXT`.
 
