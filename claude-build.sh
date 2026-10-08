@@ -19,7 +19,11 @@ STATE_FILE="BUILD_STATE.md"
 PROMPT=""
 PROMPT_FILE=""
 CONTEXT_FILES=()
-MODEL="sonnet"
+MODEL="sonnet"                 # fallback model, used when a task names none
+MODEL_FROM_STATE=1             # 1 = each run uses the Model column of the NEXT task in the state file
+EFFORT=""                      # fallback effort level. Empty = the Claude Code default
+EFFORT_FROM_STATE=1            # 1 = each run uses the Effort column of the NEXT task, else EFFORT_DEFAULTS
+EFFORT_DEFAULTS=("opus=high" "sonnet=medium" "haiku=low")   # effort by model when a task has no Effort cell
 PERMISSION_MODE="acceptEdits"
 ALLOWED_TOOLS=("Read" "Edit" "Write" "Glob" "Grep" "Bash(ls:*)" "Bash(cat:*)" "Bash(git status:*)" "Bash(git diff:*)" "Bash(git add:*)" "Bash(git commit:*)" "Bash(git log:*)")
 EXTRA_CLAUDE_ARGS=()
@@ -77,7 +81,7 @@ EXAMPLES
   $NAME -v                       state and log tail, even after the build ended
   $NAME -k                       stop the background build
   */30 * * * * $SCRIPT_PATH -o                  (cron)
-  $NAME -r -m opus -t 2 -i docs/spec.md -i docs/api/         another project
+  $NAME -r -m opus -t 2 -i docs/spec.md -i docs/api/         force opus for every run
 
 FLAGS  (a flag overrides the config file, which overrides the built-in default)
   -r, --run                  run the loop in this terminal
@@ -91,7 +95,8 @@ FLAGS  (a flag overrides the config file, which overrides the built-in default)
   -P, --prompt TEXT          prompt for every run (see PROMPT PLACEHOLDERS)
   -f, --prompt-file FILE     read the prompt from a file
   -i, --context PATH         file or directory to start reading from. Repeat for more
-  -m, --model NAME           model for each run                [$MODEL]
+  -m, --model NAME           force one model for every run     [$MODEL, or per task from the state file]
+  -e, --effort LEVEL         force one effort level every run  [per task from the state file, else by model]
   -M, --permission-mode M    Claude Code permission mode       [$PERMISSION_MODE]
   -t, --tasks-per-run N      tasks to attempt per run          [$TASKS_PER_RUN]
   -T, --timeout DURATION     longest one run may take, e.g. 3h [$TIMEOUT]
@@ -104,6 +109,17 @@ PROMPT PLACEHOLDERS
   {state_file}   the state file name
   {tasks_per_run}  how many tasks to do per run
   {context}      a sentence listing the --context paths (empty if none)
+  {model} {effort}  the model and effort chosen for this run
+  {model_rule}   tells the run to stop before a task that needs a different model
+                 (added automatically at the end if your prompt does not use it)
+
+MODEL AND EFFORT PER TASK
+  With MODEL_FROM_STATE=1 (the default) the script reads the Model column of the NEXT task
+  in the state file and starts the run with that model. Consecutive tasks with the same
+  model share a run. When the next task names a different model the run ends and the
+  script starts a new one. Effort works the same way from an Effort column, else by
+  model (EFFORT_DEFAULTS). A task with no Model cell uses MODEL. -m or -e force one value
+  for every run. No model orchestrates: the script chooses.
 
 WHERE IT RUNS FROM
   You can run it from any folder. It never assumes the current folder is the project.
@@ -119,6 +135,7 @@ CONFIG FILE
   ${CONFIG_USED}
   Plain shell: KEY=value lines and arrays. It is executed, so only trust your own.
   Keys: PROJECT_NAME PROJECT_DIR STATE_FILE PROMPT PROMPT_FILE CONTEXT_FILES MODEL
+  MODEL_FROM_STATE EFFORT EFFORT_FROM_STATE EFFORT_DEFAULTS
   PERMISSION_MODE ALLOWED_TOOLS EXTRA_CLAUDE_ARGS CLAUDE_BIN TASKS_PER_RUN TIMEOUT
   INTERVAL AFTER_RUN BACKOFF_STEPS LOG_DIR REQUIRE_GIT REDACT_FILES
 
@@ -189,7 +206,8 @@ while [ $# -gt 0 ]; do
     -P|--prompt) PROMPT="$2"; PROMPT_FILE=""; shift 2 ;;
     -f|--prompt-file) PROMPT_FILE="$2"; shift 2 ;;
     -i|--context) [ $CTX_FROM_FLAG -eq 0 ] && CONTEXT_FILES=() && CTX_FROM_FLAG=1; CONTEXT_FILES+=("$2"); shift 2 ;;
-    -m|--model) MODEL="$2"; shift 2 ;;
+    -m|--model) MODEL="$2"; MODEL_FROM_STATE=0; shift 2 ;;
+    -e|--effort) EFFORT="$2"; EFFORT_FROM_STATE=0; shift 2 ;;
     -M|--permission-mode) PERMISSION_MODE="$2"; shift 2 ;;
     -t|--tasks-per-run) TASKS_PER_RUN="$2"; shift 2 ;;
     -T|--timeout) TIMEOUT="$2"; shift 2 ;;
@@ -235,6 +253,27 @@ task_counts() {
     hdr && !/^\|/ { exit }
     END { printf "%d %d", d+0, t+0 }' "$STATE_FILE"
 }
+# Prints one cell of the task row whose Id is $1, from the column named $2 (empty if the column or row is missing).
+task_cell() {
+  awk -F'|' -v id="$1" -v col="$2" '
+    function trim(s){gsub(/^[ \t]+|[ \t]+$/,"",s);return s}
+    !h && /^\|[ \t]*Id[ \t]*\|/ { for(i=2;i<NF;i++) if (tolower(trim($i))==tolower(col)) c=i; h=1; next }
+    h && c && trim($2)==id { print trim($c); exit }' "$STATE_FILE"
+}
+# Decide the model and effort for the run that starts at task $1. Sets RUN_MODEL, RUN_EFFORT, RUN_FROM_STATE.
+plan_run() {
+  local id="$1" m="" e="" kv
+  RUN_MODEL="$MODEL"; RUN_EFFORT="$EFFORT"; RUN_FROM_STATE=0
+  if [ "$MODEL_FROM_STATE" -eq 1 ]; then
+    m=$(task_cell "$id" Model | tr 'A-Z' 'a-z' | tr -d '*' | sed 's/[ ,(].*//')   # "Sonnet (copywriter)" -> sonnet
+    [ -n "$m" ] && { RUN_MODEL="$m"; RUN_FROM_STATE=1; }
+  fi
+  if [ "$EFFORT_FROM_STATE" -eq 1 ]; then
+    e=$(task_cell "$id" Effort | tr 'A-Z' 'a-z' | tr -d '*' | sed 's/[ ,(].*//')
+    if [ -z "$e" ]; then for kv in "${EFFORT_DEFAULTS[@]+"${EFFORT_DEFAULTS[@]}"}"; do [ "${kv%%=*}" = "$RUN_MODEL" ] && e="${kv#*=}"; done; fi
+    [ -n "$e" ] && RUN_EFFORT="$e"
+  fi
+}
 # Prints "id|task" for the n most recently finished tasks (last rows marked done), newest first.
 recent_done() {
   awk -F'|' -v n="$1" '
@@ -259,13 +298,18 @@ build_prompt() {
   local p="$PROMPT" ctx=""
   [ -n "$PROMPT_FILE" ] && p="$(cat "$PROMPT_FILE")"
   if [ ${#CONTEXT_FILES[@]} -gt 0 ]; then ctx="Start from these paths and read only the parts the task needs: ${CONTEXT_FILES[*]}."; fi
-  [ -z "$p" ] && p='Read {state_file}. {context} Continue the build at the NEXT task. Do up to {tasks_per_run} tasks, or stop earlier at a gate or a stop condition. After each task, update {state_file} and commit. If a stop condition applies, set STATUS to blocked with the reason and stop. Do not deploy and do not push.'
+  [ -z "$p" ] && p='Read {state_file}. {context} Continue the build at the NEXT task. Do up to {tasks_per_run} tasks, or stop earlier at a gate or a stop condition. {model_rule} After each task, update {state_file} and commit. If a stop condition applies, set STATUS to blocked with the reason and stop. Do not deploy and do not push.'
+  local rule=""
+  if [ "${RUN_FROM_STATE:-0}" -eq 1 ]; then rule="This run is on the ${RUN_MODEL} model. Do the NEXT task and any later tasks whose Model column is also ${RUN_MODEL}, up to ${TASKS_PER_RUN}. Stop before a task whose Model column names a different model and leave it for the next run."; fi
+  case "$p" in *"{model_rule}"*) ;; *) [ -n "$rule" ] && p="$p {model_rule}" ;; esac
+  p="${p//\{model_rule\}/$rule}"; p="${p//\{model\}/$RUN_MODEL}"; p="${p//\{effort\}/${RUN_EFFORT:-default}}"
   p="${p//\{state_file\}/$STATE_FILE}"; p="${p//\{tasks_per_run\}/$TASKS_PER_RUN}"; p="${p//\{context\}/$ctx}"
   printf '%s' "$p"
 }
 
 claude_args() {
-  printf '%s\0' -p "$(build_prompt)" --model "$MODEL" --permission-mode "$PERMISSION_MODE" --output-format text
+  printf '%s\0' -p "$(build_prompt)" --model "$RUN_MODEL" --permission-mode "$PERMISSION_MODE" --output-format text
+  [ -n "$RUN_EFFORT" ] && printf '%s\0' --effort "$RUN_EFFORT"
   [ ${#ALLOWED_TOOLS[@]} -gt 0 ] && { printf '%s\0' --allowedTools; printf '%s\0' "${ALLOWED_TOOLS[@]}"; }
   [ ${#EXTRA_CLAUDE_ARGS[@]} -gt 0 ] && printf '%s\0' "${EXTRA_CLAUDE_ARGS[@]}"
 }
@@ -302,7 +346,11 @@ fi
 # ---------- preview (flags without -r, -b, or -o) ----------
 if [ $RUN -eq 0 ] && [ $ONCE -eq 0 ] && [ $BACKGROUND -eq 0 ]; then
   echo "PREVIEW ONLY. Nothing was started."; echo "config:    $CONFIG_USED"; echo "project:   $(pwd)"; echo "state:     $STATE_FILE   ($(task_counts) done/total)"
-  echo "settings:  model=$MODEL mode=$PERMISSION_MODE tasks/run=$TASKS_PER_RUN timeout=$TIMEOUT interval=${INTERVAL}s after-run=${AFTER_RUN}s"
+  plan_run "$(state NEXT)"
+  echo "settings:  mode=$PERMISSION_MODE tasks/run=$TASKS_PER_RUN timeout=$TIMEOUT interval=${INTERVAL}s after-run=${AFTER_RUN}s"
+  echo "model:     $([ "$MODEL_FROM_STATE" -eq 1 ] && echo "from each task's Model column, fallback $MODEL" || echo "$MODEL for every run (fixed)")"
+  echo "effort:    $([ "$EFFORT_FROM_STATE" -eq 1 ] && echo "from each task's Effort column, else by model ($(echo "${EFFORT_DEFAULTS[*]}"))" || echo "${EFFORT:-Claude Code default} for every run (fixed)")"
+  echo "next run:  task $(state NEXT) on $RUN_MODEL, effort ${RUN_EFFORT:-default}"
   echo "context:   ${CONTEXT_FILES[*]:-none}"
   for c in "${CONTEXT_FILES[@]+"${CONTEXT_FILES[@]}"}"; do [ -e "$c" ] || echo "  warning: context path not found: $c"; done
   echo "allowed:   ${ALLOWED_TOOLS[*]}"; echo "prompt:"; build_prompt | fold -s -w 100 | sed 's/^/  /'; echo
@@ -370,7 +418,8 @@ while true; do
   if [ -f "$BACKOFF" ] && [ "$(date +%s)" -lt "$(cat "$BACKOFF")" ]; then
     say "waiting until $(date -d @"$(cat "$BACKOFF")" '+%H:%M') after a failed run ($done_n/$total done, next $next)"
   else
-    say "running: next task $next ($done_n/$total done)"
+    plan_run "$next"
+    say "running: next task $next on $RUN_MODEL, effort ${RUN_EFFORT:-default} ($done_n/$total done)"
     resume_build; rc=$?
     [ $rc -eq 1 ] && exit 1
     if [ $rc -eq 0 ]; then
