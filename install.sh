@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 A. Todd Emerson. See LICENSE and NOTICE.
 # install.sh: install claude-build into ~/.local/bin.
 #   curl -fsSL https://raw.githubusercontent.com/ToddE/claude-build/main/install.sh | bash
 #   wget -qO- https://raw.githubusercontent.com/ToddE/claude-build/main/install.sh | bash
@@ -51,6 +53,7 @@ mkdir -p "$DEST/examples"
 for f in claude-build.conf BUILD_STATE.md PLAN.md; do
   get "$RAW/examples/$f" > "$DEST/examples/$f" 2>/dev/null || info "warning: could not fetch examples/$f"
 done
+for f in LICENSE NOTICE; do get "$RAW/$f" > "$DEST/$f" 2>/dev/null || info "warning: could not fetch $f"; done
 get "$RAW/README.md" > "$DEST/README.md" 2>/dev/null || true
 
 # Point the command at this version. The script finds its config beside the real file,
@@ -58,6 +61,6 @@ get "$RAW/README.md" > "$DEST/README.md" 2>/dev/null || true
 ln -sfn "$DEST/claude-build.sh" "$BIN_DIR/claude-build"
 if [ -f "$SHARE_DIR/claude-build.conf" ]; then ln -sfn "$SHARE_DIR/claude-build.conf" "$DEST/claude-build.conf"; fi
 
-info "installed $("$BIN_DIR/claude-build" --version 2>/dev/null || echo "$REF") at $BIN_DIR/claude-build"
+info "installed $("$BIN_DIR/claude-build" --version 2>/dev/null | head -n 1 || echo "$REF") at $BIN_DIR/claude-build"
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) info "add $BIN_DIR to your PATH, for example: export PATH=\"$BIN_DIR:\$PATH\"" ;; esac
 info "next: run claude-build with no arguments for the help. Examples (config, state file, plan) are in $DEST/examples"

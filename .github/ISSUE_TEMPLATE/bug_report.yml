@@ -1,0 +1,36 @@
+name: Bug report
+description: Something does not work as the README says
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `claude-build --version` (first line)
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Operating system and bash version
+      description: For example "Ubuntu 24.04, bash 5.2"
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command you ran
+      description: The full command, and the same command without `-r` (the preview) with its output
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log lines
+      description: The end of `.build/build.log`. Remove anything private first.

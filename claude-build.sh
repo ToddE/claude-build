@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 A. Todd Emerson. See LICENSE and NOTICE.
 # claude-build.sh: keep a Claude Code build going until it is done, blocked, or at a gate.
 # Run it with no arguments for the full help. With flags but no -r, -b, or -o it only previews.
 # Pure bash. Progress goes to the terminal and to a log file. Settings: defaults below,
@@ -275,7 +277,7 @@ while [ $# -gt 0 ]; do
     --check-update) CHECK_UPDATE=1; shift ;;
     --update) UPDATE=1; shift ;;
     -I|--interactive) ASK=1; shift ;;
-    --version) echo "$NAME $VERSION"; exit 0 ;;
+    --version) printf '%s %s\nCopyright 2026 A. Todd Emerson. Apache-2.0 license.\nhttps://github.com/ToddE/claude-build\n' "$NAME" "$VERSION"; exit 0 ;;
     -*) echo "unknown option: $1 (try -h)"; exit 64 ;;
     *) POSITIONAL+=("$1"); shift ;;   # a plan path after --init, checked below
   esac

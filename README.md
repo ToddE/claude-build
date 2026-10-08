@@ -1,5 +1,7 @@
 # claude-build manual
 
+Created by A. Todd Emerson. Apache-2.0 license. Contributions welcome (section 15).
+
 `claude-build.sh` keeps a Claude Code build going until it is done, blocked, or at a gate. It reads a state file, and while the status is `ready` it starts one bounded `claude -p` session that does the next few tasks, updates the state file, and commits. Then it sleeps and checks again. Sleeping and checking use no model, so an idle or finished build costs almost nothing.
 
 Install it with the script in section 1, edit `claude-build.conf` (set `PROJECT_DIR`), and add a state file (section 4). One installed copy can build any number of projects: point it at a project with `-c` and `-d`.
@@ -30,7 +32,7 @@ The full path looks like this:
 
 [examples/PLAN.md](examples/PLAN.md) shows a plan in a structure that turns into a good table: a goal and scope, conventions, a document map, milestones with tasks that each name what to read, a check that proves they are done and a difficulty, review gates, and open decisions. Its task table is [examples/BUILD_STATE.md](examples/BUILD_STATE.md).
 
-claude-build works with any plan. A short `PLAN.md` you wrote by hand is enough to start.
+**claude-build **works with any plan. A short `PLAN.md` you wrote by hand is enough to start.
 
 ## Why claude-build
 
@@ -70,13 +72,14 @@ The idea of calling `claude -p` in a loop with progress kept in files and git is
 11. [Testing without spending tokens](#11-testing-without-spending-tokens)
 12. [Troubleshooting](#12-troubleshooting)
 13. [Safety](#13-safety)
-14. [License](#14-license)
+14. [License and credit](#14-license-and-credit)
+15. [Contributing](#15-contributing)
 
 ## 1. Quick start
 
 ### Before you start: you need a state file
 
-claude-build needs a **state file** before it can run: a Markdown file with a status line and a table of tasks (section 4). Without it, the script stops with `state file not found` and starts nothing. A project also needs to be a git repository.
+**claude-build** needs a **state file** before it can run: a Markdown file with a status line and a table of tasks (section 4). Without it, the script stops with `state file not found` and starts nothing. A project also needs to be a git repository.
 
 The task table sets the model and effort level for each task. The script reads those cells and starts each run with them. During a build it never asks a model to choose.
 
@@ -771,6 +774,10 @@ A stand-in that exits 0 and does nothing lets you see the no-progress guard stop
 - Every task is a commit, so any task can be reverted with git.
 - Keep secrets out of the state file and the log. `-s` hides values from `REDACT_FILES` in the log tail it prints, but the log file itself is not scrubbed, so keep it out of git and out of screenshots.
 
-## 14. License
+## 14. License and credit
 
-MIT. See [LICENSE](LICENSE).
+claude-build is copyright 2026 A. Todd Emerson and licensed under the [Apache License 2.0](LICENSE). If you redistribute it, or a modified version, keep the [LICENSE](LICENSE) and [NOTICE](NOTICE) files with it and keep the copyright notices in the source files. Contributions are accepted under the same license (Apache-2.0, section 5).
+
+## 15. Contributing
+
+Contributions are welcome: bug reports, fixes, documentation, and the open items in [TODO.md](TODO.md) (macOS support is the largest). See [CONTRIBUTING.md](CONTRIBUTING.md) for how to test a change without spending tokens, and for what to include in an issue or pull request.
