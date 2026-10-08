@@ -1,0 +1,104 @@
+/* inform9 design tokens. Draft 1. Light is the default. Dark follows the system setting unless data-theme is set. */
+:root {
+  /* brand */
+  --ink: #1D1A3F;
+  --ink-deep: #14122B;
+  --blue: #2A4BB0;
+  --blue-deep: #1E3A8A;
+  --green: #18805A;
+  --green-deep: #0F6246;
+  --orange: #F2823A;
+  --orange-deep: #B9480A;
+
+  /* surfaces and text */
+  --bg: #F8F8F5;
+  --surface: #FFFFFF;
+  --surface-sunken: #EEF0F3;
+  --border: #CFD2D9;
+  --text: #24262E;
+  --text-muted: #464A56;
+  --text-subtle: #6B6F7B;
+
+  /* roles */
+  --primary: var(--blue);
+  --primary-hover: var(--blue-deep);
+  --primary-text: #FFFFFF;
+  --accent: var(--green);
+  --cta: var(--orange);
+  --cta-hover: #E5712A;
+  --cta-text: var(--ink);
+  --link: var(--blue);
+  --focus: #2A4BB0;
+  --heading: var(--ink);
+  --on-ink: #F8F8F5;
+
+  /* request and share status chips */
+  --chip-not-requested-bg: #EEF0F3; --chip-not-requested-text: #464A56;
+  --chip-sent-bg: #E4EAFB;          --chip-sent-text: #1E3A8A;
+  --chip-failed-bg: #FBE4E1;        --chip-failed-text: #9B1C12;
+  --chip-declined-bg: #EAE7F5;      --chip-declined-text: #3B2F7A;
+  --chip-completed-bg: #DDF3E8;     --chip-completed-text: #0F6246;
+
+  /* type */
+  --font-heading: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+
+  /* shape and space */
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 16px;
+  --shadow: 0 1px 2px rgba(29, 26, 63, .08), 0 4px 12px rgba(29, 26, 63, .06);
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+  --space-5: 24px; --space-6: 32px; --space-7: 48px; --space-8: 64px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14122B;
+    --surface: #1D1A3F;
+    --surface-sunken: #181634;
+    --border: #3A3770;
+    --text: #F8F8F5;
+    --text-muted: #CFD2D9;
+    --text-subtle: #9A9EAB;
+    --primary: #8FA8FF;
+    --primary-hover: #AFC0FF;
+    --primary-text: #14122B;
+    --accent: #3DCB91;
+    --link: #8FA8FF;
+    --focus: #8FA8FF;
+    --heading: #F8F8F5;
+    --cta-hover: #F59553;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 4px 12px rgba(0, 0, 0, .3);
+    --chip-not-requested-bg: #2B2A4A; --chip-not-requested-text: #CFD2D9;
+    --chip-sent-bg: #25356B;          --chip-sent-text: #C6D3FF;
+    --chip-failed-bg: #4A1F26;        --chip-failed-text: #FFB8B0;
+    --chip-declined-bg: #3A3270;      --chip-declined-text: #D7D0FF;
+    --chip-completed-bg: #12433A;     --chip-completed-text: #A6F0CB;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #14122B;
+  --surface: #1D1A3F;
+  --surface-sunken: #181634;
+  --border: #3A3770;
+  --text: #F8F8F5;
+  --text-muted: #CFD2D9;
+  --text-subtle: #9A9EAB;
+  --primary: #8FA8FF;
+  --primary-hover: #AFC0FF;
+  --primary-text: #14122B;
+  --accent: #3DCB91;
+  --link: #8FA8FF;
+  --focus: #8FA8FF;
+  --heading: #F8F8F5;
+  --cta-hover: #F59553;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 4px 12px rgba(0, 0, 0, .3);
+  --chip-not-requested-bg: #2B2A4A; --chip-not-requested-text: #CFD2D9;
+  --chip-sent-bg: #25356B;          --chip-sent-text: #C6D3FF;
+  --chip-failed-bg: #4A1F26;        --chip-failed-text: #FFB8B0;
+  --chip-declined-bg: #3A3270;      --chip-declined-text: #D7D0FF;
+  --chip-completed-bg: #12433A;     --chip-completed-text: #A6F0CB;
+}

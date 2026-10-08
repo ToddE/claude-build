@@ -1,0 +1,433 @@
+[
+ {
+  "event_key": "verify_email",
+  "layout": "standard",
+  "audience": "any",
+  "subject": "Confirm your email for inform9",
+  "heading": "Confirm your email",
+  "body": "Hello {{name}},\n\nSelect the button to confirm your email address and finish creating your inform9 account. The link expires {{expires_text}}.",
+  "button_label": "Confirm email",
+  "button_url_key": "secure_link",
+  "details": [],
+  "footnote": "If you did not create an inform9 account, you can ignore this message.",
+  "show_code": false,
+  "unsubscribe": false,
+  "enabled": true
+ },
+ {
+  "event_key": "reset_password",
+  "layout": "standard",
+  "audience": "any",
+  "subject": "Reset your inform9 password",
+  "heading": "Reset your password",
+  "body": "Hello {{name}},\n\nSelect the button to choose a new password. The link expires {{expires_text}} and works once.",
+  "button_label": "Choose a new password",
+  "button_url_key": "secure_link",
+  "details": [],
+  "footnote": "If you did not ask for a reset, ignore this message. Your password stays the same.",
+  "show_code": false,
+  "unsubscribe": false,
+  "enabled": true
+ },
+ {
+  "event_key": "request",
+  "layout": "standard",
+  "audience": "payee",
+  "subject": "{{business_names}} asked for your W-9",
+  "heading": "{{business_names}} asked for your W-9",
+  "body": "Hello {{payee_name}},\n\n{{business_names}} uses inform9 to collect W-9 forms. You fill in the form online and sign it on screen. It usually takes a few minutes.\n\ninform9 shares your completed W-9 only with the business or businesses named in this message.",
+  "button_label": "Complete your W-9",
+  "button_url_key": "secure_link",
+  "details": [],
+  "footnote": "You received this message because {{business_names}} asked inform9 to request a W-9 from {{payee_email}}.",
+  "show_code": false,
+  "unsubscribe": false,
+  "enabled": true
+ },
+ {
+  "event_key": "reminder",
+  "layout": "standard",
+  "audience": "payee",
+  "subject": "Reminder: {{business_names}} is waiting for your W-9",
+  "heading": "Your W-9 is still needed",
+  "body": "Hello {{payee_name}},\n\n{{business_names}} is still waiting for your W-9. You can complete and sign it online in a few minutes.",
+  "button_label": "Complete your W-9",
+  "button_url_key": "secure_link",
+  "details": [],
+  "footnote": "This is reminder {{reminder_number}} of {{reminder_cap}}.",
+  "show_code": false,
+  "unsubscribe": false,
+  "enabled": true
+ },
+ {
+  "event_key": "share_waiting",
+  "layout": "standard",
+  "audience": "recipient",
+  "subject": "{{sender_name}} sent you a W-9",
+  "heading": "A W-9 from {{sender_name}} is waiting",
+  "body": "{{sender_name}} sent you a W-9 through inform9.\n\nConfirm your email address with a one-time code to view and download it. The link works until {{expires_date}}.",
+  "button_label": "View the W-9",
+  "button_url_key": "share_link",
+  "details": [],
+  "footnote": "{{sender_name}} entered your email address. If this message reached you by mistake, use the link below to tell us.",
+  "show_code": false,
+  "unsubscribe": false,
+  "enabled": true
+ },
+ {
+  "event_key": "otp",
+  "layout": "standard",
+  "audience": "any",
+  "subject": "Your inform9 code is {{code}}",
+  "heading": "Your one-time code",
+  "body": "Enter this code to continue. It works for {{code_minutes}} minutes.",
+  "button_label": null,
+  "button_url_key": null,
+  "details": [],
+  "footnote": "If you did not ask for a code, ignore this message.",
+  "show_code": true,
+  "unsubscribe": false,
+  "enabled": true
+ },
+ {
+  "event_key": "payee_received",
+  "layout": "standard",
+  "audience": "payee",
+  "subject": "Your W-9 for {{business_names}} was received",
+  "heading": "W-9 received",
+  "body": "Hello {{payee_name}},\n\n{{business_names}} received your signed W-9. Thank you for completing it.",
+  "button_label": null,
+  "button_url_key": null,
+  "details": [
+   {
+    "label": "Signed on",
+    "value": "{{signed_at}}"
+   },
+   {
+    "label": "Sent to",
+    "value": "{{business_names}}"
+   }
+  ],
+  "footnote": "Questions about this form can go to {{business_names}}.",
+  "show_code": false,
+  "unsubscribe": false,
+  "enabled": true
+ },
+ {
+  "event_key": "owner_completed",
+  "layout": "standard",
+  "audience": "business_owner",
+  "subject": "{{payee_name}} completed a W-9",
+  "heading": "W-9 received from {{payee_name}}",
+  "body": "{{payee_name}} completed and signed a W-9 for {{business_name}}. You can view and download it in inform9.",
+  "button_label": "View payee",
+  "button_url_key": "payee_link",
+  "details": [
+   {
+    "label": "Payee",
+    "value": "{{payee_name}}"
+   },
+   {
+    "label": "Business",
+    "value": "{{business_name}}"
+   },
+   {
+    "label": "Signed on",
+    "value": "{{signed_at}}"
+   }
+  ],
+  "footnote": null,
+  "show_code": false,
+  "unsubscribe": false,
+  "enabled": true
+ },
+ {
+  "event_key": "owner_updated",
+  "layout": "standard",
+  "audience": "business_owner",
+  "subject": "{{payee_name}} updated their W-9",
+  "heading": "Updated W-9 from {{payee_name}}",
+  "body": "{{payee_name}} sent an updated W-9 for {{business_name}}. The earlier version stays saved.",
+  "button_label": "View payee",
+  "button_url_key": "payee_link",
+  "details": [
+   {
+    "label": "Payee",
+    "value": "{{payee_name}}"
+   },
+   {
+    "label": "Business",
+    "value": "{{business_name}}"
+   },
+   {
+    "label": "Updated on",
+    "value": "{{signed_at}}"
+   }
+  ],
+  "footnote": null,
+  "show_code": false,
+  "unsubscribe": false,
+  "enabled": true
+ },
+ {
+  "event_key": "owner_declined",
+  "layout": "standard",
+  "audience": "business_owner",
+  "subject": "{{payee_name}} declined your W-9 request",
+  "heading": "Request declined",
+  "body": "{{payee_name}} declined the W-9 request for {{business_name}}.",
+  "button_label": "View payee",
+  "button_url_key": "payee_link",
+  "details": [
+   {
+    "label": "Payee",
+    "value": "{{payee_name}}"
+   },
+   {
+    "label": "Business",
+    "value": "{{business_name}}"
+   },
+   {
+    "label": "Reason",
+    "value": "{{decline_reason}}"
+   }
+  ],
+  "footnote": null,
+  "show_code": false,
+  "unsubscribe": false,
+  "enabled": true
+ },
+ {
+  "event_key": "owner_delivery_failed",
+  "layout": "standard",
+  "audience": "business_owner",
+  "subject": "Your W-9 request to {{payee_name}} could not be delivered",
+  "heading": "Email could not be delivered",
+  "body": "The request email to {{payee_email}} bounced. Check the address and send the request again.",
+  "button_label": "Fix and resend",
+  "button_url_key": "payee_link",
+  "details": [
+   {
+    "label": "Payee",
+    "value": "{{payee_name}}"
+   },
+   {
+    "label": "Email",
+    "value": "{{payee_email}}"
+   }
+  ],
+  "footnote": null,
+  "show_code": false,
+  "unsubscribe": false,
+  "enabled": true
+ },
+ {
+  "event_key": "owner_reminders_ended",
+  "layout": "standard",
+  "audience": "business_owner",
+  "subject": "Reminders ended for {{payee_name}}",
+  "heading": "Reminders have ended",
+  "body": "The last reminder went to {{payee_name}} for {{business_name}}, and the W-9 is still open. You can send the request again or reach out another way.",
+  "button_label": "Send again",
+  "button_url_key": "payee_link",
+  "details": [
+   {
+    "label": "Payee",
+    "value": "{{payee_name}}"
+   },
+   {
+    "label": "Business",
+    "value": "{{business_name}}"
+   }
+  ],
+  "footnote": null,
+  "show_code": false,
+  "unsubscribe": false,
+  "enabled": true
+ },
+ {
+  "event_key": "owner_reminders_stopped",
+  "layout": "standard",
+  "audience": "business_owner",
+  "subject": "Reminders stopped for {{payee_name}}",
+  "heading": "Reminders stopped",
+  "body": "Reminders to {{payee_name}} for {{business_name}} have stopped because {{stop_reason}}.",
+  "button_label": "View payee",
+  "button_url_key": "payee_link",
+  "details": [],
+  "footnote": null,
+  "show_code": false,
+  "unsubscribe": false,
+  "enabled": true
+ },
+ {
+  "event_key": "payee_retrieved",
+  "layout": "standard",
+  "audience": "payee",
+  "subject": "{{recipient_business}} downloaded your W-9",
+  "heading": "Your W-9 was downloaded",
+  "body": "{{recipient_business}} downloaded the W-9 you sent.",
+  "button_label": null,
+  "button_url_key": null,
+  "details": [
+   {
+    "label": "Recipient",
+    "value": "{{recipient_email}}"
+   },
+   {
+    "label": "Downloaded on",
+    "value": "{{retrieved_at}}"
+   }
+  ],
+  "footnote": "inform9 sends this notice for the first download only.",
+  "show_code": false,
+  "unsubscribe": false,
+  "enabled": true
+ },
+ {
+  "event_key": "payee_share_closed",
+  "layout": "standard",
+  "audience": "payee",
+  "subject": "Your W-9 to {{recipient_email}} was closed",
+  "heading": "Your W-9 link is closed",
+  "body": "{{recipient_email}} {{closed_reason}}. The link no longer works.",
+  "button_label": "View sent W-9s",
+  "button_url_key": "shares_link",
+  "details": [],
+  "footnote": null,
+  "show_code": false,
+  "unsubscribe": false,
+  "enabled": true
+ },
+ {
+  "event_key": "payee_send_failed",
+  "layout": "standard",
+  "audience": "payee",
+  "subject": "Your W-9 to {{recipient_email}} could not be delivered",
+  "heading": "Email could not be delivered",
+  "body": "The email to {{recipient_email}} bounced. Check the address and send the W-9 again.",
+  "button_label": "View sent W-9s",
+  "button_url_key": "shares_link",
+  "details": [],
+  "footnote": null,
+  "show_code": false,
+  "unsubscribe": false,
+  "enabled": true
+ },
+ {
+  "event_key": "payee_sending_paused",
+  "layout": "standard",
+  "audience": "payee",
+  "subject": "Sending is paused on your inform9 account",
+  "heading": "Sending is paused",
+  "body": "Hello {{name}},\n\nWe paused W-9 sending from your account while we review recent activity. We will email you when the review is done.",
+  "button_label": null,
+  "button_url_key": null,
+  "details": [],
+  "footnote": "Questions? Write to {{support_email}}.",
+  "show_code": false,
+  "unsubscribe": false,
+  "enabled": true
+ },
+ {
+  "event_key": "payee_sending_resumed",
+  "layout": "standard",
+  "audience": "payee",
+  "subject": "Sending is available again",
+  "heading": "Sending is available again",
+  "body": "Hello {{name}},\n\nWe finished our review. You can send W-9s from your account again.",
+  "button_label": "Open inform9",
+  "button_url_key": "app_link",
+  "details": [],
+  "footnote": null,
+  "show_code": false,
+  "unsubscribe": false,
+  "enabled": true
+ },
+ {
+  "event_key": "payee_sending_blocked",
+  "layout": "standard",
+  "audience": "payee",
+  "subject": "Sending is turned off on your inform9 account",
+  "heading": "Sending is turned off",
+  "body": "Hello {{name}},\n\nAfter a review, we turned off W-9 sending from your account. Your account and saved W-9 remain available. To ask about this decision, write to {{support_email}}.",
+  "button_label": null,
+  "button_url_key": null,
+  "details": [],
+  "footnote": null,
+  "show_code": false,
+  "unsubscribe": false,
+  "enabled": true
+ },
+ {
+  "event_key": "receipt",
+  "layout": "standard",
+  "audience": "business_owner",
+  "subject": "Your inform9 receipt",
+  "heading": "Payment received",
+  "body": "Hello {{name}},\n\nThank you. Your {{plan_name}} plan is active.",
+  "button_label": "Open inform9",
+  "button_url_key": "app_link",
+  "details": [
+   {
+    "label": "Plan",
+    "value": "{{plan_name}}"
+   },
+   {
+    "label": "Amount",
+    "value": "{{amount}}"
+   },
+   {
+    "label": "Paid on",
+    "value": "{{paid_on}}"
+   },
+   {
+    "label": "Renews on",
+    "value": "{{renews_on}}"
+   }
+  ],
+  "footnote": null,
+  "show_code": false,
+  "unsubscribe": false,
+  "enabled": true
+ },
+ {
+  "event_key": "account_canceled",
+  "layout": "standard",
+  "audience": "business_owner",
+  "subject": "Your inform9 account was canceled",
+  "heading": "Account canceled",
+  "body": "Hello {{name}},\n\nYour plan has ended and reminders have stopped. You can download your W-9s until {{download_until}}. After that date, inform9 deletes your business records under our retention policy.",
+  "button_label": "Download my W-9s",
+  "button_url_key": "app_link",
+  "details": [
+   {
+    "label": "Canceled on",
+    "value": "{{canceled_on}}"
+   },
+   {
+    "label": "Download until",
+    "value": "{{download_until}}"
+   }
+  ],
+  "footnote": null,
+  "show_code": false,
+  "unsubscribe": false,
+  "enabled": true
+ },
+ {
+  "event_key": "product_updates",
+  "layout": "standard",
+  "audience": "any",
+  "subject": "{{subject_line}}",
+  "heading": "{{heading_text}}",
+  "body": "{{body_text}}",
+  "button_label": null,
+  "button_url_key": null,
+  "details": [],
+  "footnote": null,
+  "show_code": false,
+  "unsubscribe": true,
+  "enabled": false
+ }
+]
