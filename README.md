@@ -198,10 +198,11 @@ Options are environment variables placed before `bash`:
 | `CLAUDE_BUILD_VERSION` | latest release, else `main` | A release tag such as `v0.1.0`, or `main` |
 | `BIN_DIR` | `~/.local/bin` | Where the `claude-build` link goes |
 | `SHARE_DIR` | `~/.local/share/claude-build` | Where the files go |
+| `CLAUDE_BUILD_KEEP` | `2` | How many installed versions to keep, newest first |
 
 For example, `curl -fsSL .../install.sh | CLAUDE_BUILD_VERSION=v0.1.0 bash` installs that version.
 
-**Upgrading.** Check with `claude-build --check-update`, which asks GitHub for the latest release, prints whether a newer one exists, and changes nothing. Install it with `claude-build --update`, which shows the installer URL and asks `Continue? [y/N]`. Or run the install command again. Either way the new version goes beside the old ones and the link moves. These two flags are the only times the script uses the network, and it never checks on its own, so a build that runs unattended never changes or contacts anything. `--update` works for copies made by the installer. For a git clone it tells you to run `git pull`.
+**Upgrading.** Check with `claude-build --check-update`, which asks GitHub for the latest release, prints whether a newer one exists, and changes nothing. Install it with `claude-build --update`, which shows the installer URL and asks `Continue? [y/N]`. Or run the install command again. Either way the installer downloads into a temporary folder, checks the files, and copies them into place only if every check passes. The new version goes beside the previous one and the link moves. Older versions are removed (see `CLAUDE_BUILD_KEEP`). `--update` pipes the installer straight into bash and does not save a copy of it. To roll back one version, run `ln -sfn ~/.local/share/claude-build/<old version>/claude-build.sh ~/.local/bin/claude-build`. These two flags are the only times the script uses the network, and it never checks on its own, so a build that runs unattended never changes or contacts anything. `--update` works for copies made by the installer. For a git clone it tells you to run `git pull`.
 
 **Your config.** Put a config you want to keep at `~/.local/share/claude-build/claude-build.conf`. The installer links it into each version folder, so it survives upgrades. The installer never overwrites a config. You can also keep configs inside your projects and pass `-c`.
 

@@ -318,7 +318,7 @@ if [ $(( CHECK_UPDATE + UPDATE )) -gt 0 ]; then
   esac
   [ -t 0 ] && [ -t 1 ] || { echo "--update asks for confirmation, so it needs a terminal. Or run the installer directly (see the README)."; exit 64; }
   echo "Update $NAME from $VERSION to ${latest#v}."
-  echo "This downloads and runs https://raw.githubusercontent.com/$REPO/$latest/install.sh. Older versions stay in place, and your config is not changed."
+  echo "This downloads and runs https://raw.githubusercontent.com/$REPO/$latest/install.sh. The previous version is kept for rollback, older ones are removed, and your config is not changed."
   read -r -p "Continue? [y/N] " ans
   case "$ans" in y|Y|yes|YES) ;; *) echo "Not updated."; exit 0 ;; esac
   fetch "https://raw.githubusercontent.com/$REPO/$latest/install.sh" | CLAUDE_BUILD_VERSION="$latest" bash
