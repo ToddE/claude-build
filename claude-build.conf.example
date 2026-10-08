@@ -1,0 +1,263 @@
+# =============================================================================
+# claude-build.conf.example: a complete, commented settings file for claude-build.sh
+# =============================================================================
+# HOW TO USE THIS FILE
+#   1. Copy it:            cp claude-build.conf.example claude-build.conf
+#   2. Edit the copy: at the least set PROJECT_DIR (the folder the build works in).
+#   3. Check it:           ./claude-build.sh -c claude-build.conf        (a preview, starts nothing)
+#   4. Run it:             ./claude-build.sh -c claude-build.conf -r     (or -b for the background)
+#
+# This file is read as shell, so keep it to KEY=value lines and ( ) arrays, and quote values that
+# contain spaces. It is executed, so only use a config you wrote or trust. The script refuses a
+# config that another user owns or that anyone can write to (fix with: chmod o-w claude-build.conf).
+#
+# WHICH CONFIG IS USED
+#   -c FILE, else claude-build.conf in the folder you are in, else claude-build.conf beside the
+#   script. This example file is never used by name; copy it first.
+#
+# PRECEDENCE, lowest to highest:  built-in default  <  this file  <  command-line flag.
+# Every setting has a flag that overrides it for one run (shown as "Flag:" below). The only
+# settings with no flag are listed under "config only".
+#
+# PATHS
+#   A "relative path" below is relative to PROJECT_DIR, not to the folder you ran the command in.
+#   The exceptions are the -c and -d flags, which are relative to where you typed the command.
+#   Every setting here is optional except that PROJECT_DIR must be known (set here, passed with
+#   -d, or implied by the script living in a git repository's scripts/ folder).
+#
+# Full reference: README_claude-build.md in this folder. Quick check of everything: ./claude-build.sh -h
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# WHERE THINGS ARE
+# -----------------------------------------------------------------------------
+
+# PROJECT_NAME
+#   A label shown in the log and in the -v report. Has no other effect.
+#   Values: any text            Default: "build"            Flag: none
+PROJECT_NAME="myproject"
+
+# PROJECT_DIR
+#   The project's folder on this computer. The script changes into it before it does anything, so
+#   you can run claude-build.sh from any folder. It must be a git repository (see REQUIRE_GIT),
+#   because every task is committed there. STATE_FILE, CONTEXT_FILES, PROMPT_FILE, LOG_DIR, and
+#   REDACT_FILES are all relative to this folder.
+#   Use an absolute path. A relative path here is relative to the folder holding this config file.
+#   If this is empty and no -d flag is given, the script uses the folder above its own scripts/
+#   folder only if that is a git repository. Otherwise it stops. It never uses the folder you
+#   happened to run it from. If you move the project, change this line.
+#   Values: a folder path       Default: none               Flag: -d, --project DIR
+PROJECT_DIR="/home/you/Workspace/myproject"
+
+# STATE_FILE
+#   The file that records progress, and the only thing a project must provide. Each run reads it to
+#   learn where to continue and updates it after every task. It must start with STATUS, NEXT, and
+#   BLOCKED_REASON lines and contain a Markdown task table with Id and Status columns:
+#
+#       STATUS: ready
+#       NEXT: 1
+#       BLOCKED_REASON:
+#
+#       | Id | Task            | Status |
+#       | --- | --- | --- |
+#       | 1  | Set up the repo | todo   |
+#       | 2  | Write the tests | todo   |
+#
+#   Stored at PROJECT_DIR/STATE_FILE. It is committed with the project. Put it somewhere else
+#   with a path such as "docs/PROGRESS.md".
+#   Values: a file path         Default: "BUILD_STATE.md"   Flag: -S, --state FILE
+STATE_FILE="BUILD_STATE.md"
+
+# LOG_DIR
+#   Where the script keeps its working files: build.log (all output from every run), supervisor.log
+#   (the output of a -b run), build.lock, backoff_until, failures, and the stop file. These are
+#   not project history, so add the folder to .gitignore. Use a different folder for each build
+#   you run at the same time.
+#   Stored at PROJECT_DIR/LOG_DIR.
+#   Values: a folder path       Default: ".build"           Flag: -l, --log-dir DIR
+LOG_DIR=".build"
+
+
+# -----------------------------------------------------------------------------
+# WHAT EACH RUN IS TOLD
+# -----------------------------------------------------------------------------
+
+# PROMPT
+#   The instruction given to the model at the start of every run. Keep it short: each run starts
+#   fresh, so it should point at the state file and the files to read, not repeat them.
+#   Placeholders, filled in before the run:
+#     {state_file}      the STATE_FILE name
+#     {tasks_per_run}   the TASKS_PER_RUN number
+#     {context}         a sentence listing CONTEXT_FILES, or nothing if that list is empty
+#   Values: text in single quotes   Default: read the state file, continue at NEXT, do up to N
+#   tasks, update the state file and commit after each, set STATUS to blocked at a stop condition,
+#   do not deploy or push.      Flag: -P, --prompt TEXT   (a flag prompt replaces this one)
+PROMPT='Read {state_file}. {context} Continue the build at the NEXT task. Do up to {tasks_per_run} tasks, or stop earlier at a gate or a stop condition. After each task, update {state_file} and commit. If a stop condition applies, set STATUS to blocked with the reason and stop. Do not deploy and do not push.'
+
+# PROMPT_FILE
+#   A path to a text file holding the prompt, for long prompts. The same placeholders work inside
+#   it. If set, it is used instead of PROMPT. Leave empty to use PROMPT above.
+#   Relative to PROJECT_DIR.
+#   Values: a file path or ""   Default: ""                 Flag: -f, --prompt-file FILE
+PROMPT_FILE=""
+
+# CONTEXT_FILES
+#   Files or folders the run should start reading from. They are named in the prompt through
+#   {context}. Nothing is loaded in advance, so listing a folder costs nothing until the run opens
+#   a file in it. Relative to PROJECT_DIR. An array, one quoted path per entry.
+#   Examples:  CONTEXT_FILES=("README.md")
+#              CONTEXT_FILES=("docs/" "STYLE.md" "specs/api.md")
+#   Values: an array of paths   Default: ()
+#   Flag: -i, --context PATH   (repeat for more. The first -i on the command line replaces this list)
+CONTEXT_FILES=("README.md")
+
+
+# -----------------------------------------------------------------------------
+# HOW EACH RUN IS DONE
+# -----------------------------------------------------------------------------
+
+# MODEL
+#   The model for each run, passed to "claude --model". Examples: sonnet, opus, haiku, or a full
+#   model id. Choose the model that suits the work once. Do not start low and redo on a higher one.
+#   Values: a model name        Default: "sonnet"           Flag: -m, --model NAME
+MODEL="sonnet"
+
+# PERMISSION_MODE
+#   The Claude Code permission mode for the run. "acceptEdits" accepts file edits without asking.
+#   Commands still have to be on ALLOWED_TOOLS. Avoid any mode that skips all checks, because an
+#   unattended run could then do anything.
+#   Values: a Claude Code permission mode, such as acceptEdits or default
+#   Default: "acceptEdits"      Flag: -M, --permission-mode MODE
+PERMISSION_MODE="acceptEdits"
+
+# ALLOWED_TOOLS   (config only)
+#   The only tools and commands an unattended run may use. Anything not listed is refused. An
+#   entry is a tool name (Read, Edit, Write, Glob, Grep, Agent) or a command pattern such as
+#   "Bash(pnpm:*)", which allows commands that start with pnpm. Leave out anything you do not
+#   want an unattended run to do: git push, deploy commands, and anything that deletes (rm).
+#   If a run fails because a command was refused, build.log says which. Add it only if it is safe.
+#   Pick or combine the lists below. The first is the minimum for any project.
+#
+#   Minimum (read, write, commit):
+ALLOWED_TOOLS=(
+  "Read" "Edit" "Write" "Glob" "Grep"
+  "Bash(ls:*)" "Bash(cat:*)" "Bash(mkdir:*)"
+  "Bash(git status:*)" "Bash(git diff:*)" "Bash(git add:*)" "Bash(git commit:*)" "Bash(git log:*)"
+)
+#   Add for a Node or TypeScript project:
+#     "Bash(pnpm:*)" "Bash(npm:*)" "Bash(node:*)" "Bash(npx:*)"
+#   Add for a Python project:
+#     "Bash(python3:*)" "Bash(pip:*)" "Bash(pytest:*)"
+#   Add for a Rust project:
+#     "Bash(cargo:*)"
+#   Add to let the run launch helper agents:
+#     "Agent"
+#   Deliberately NOT here by default: "Bash(git push:*)", "Bash(rm:*)", deploy commands.
+
+# EXTRA_CLAUDE_ARGS   (config only)
+#   Extra arguments added to every "claude" command, as an array, one word per entry.
+#   Example:  EXTRA_CLAUDE_ARGS=("--max-turns" "60")
+#   Values: an array            Default: ()
+EXTRA_CLAUDE_ARGS=()
+
+# CLAUDE_BIN   (config only)
+#   The command that starts Claude Code. Use a full path if cron or a timer cannot find it, for
+#   example "/home/you/.local/bin/claude". Tests point it at a stand-in script.
+#   Values: a command or path   Default: "claude"
+CLAUDE_BIN="claude"
+
+# TASKS_PER_RUN
+#   How many tasks each run attempts. This is an instruction in the prompt, not a hard limit.
+#   Fewer tasks mean smaller contexts and more frequent saves. More tasks mean fewer start-ups.
+#   Values: a whole number      Default: 5                  Flag: -t, --tasks-per-run N
+TASKS_PER_RUN=5
+
+# TIMEOUT
+#   The longest one run may take before it is stopped. Uses the "timeout" command's units:
+#   90s, 45m, 3h, 1d. A run stopped this way counts as a failed run and triggers a backoff.
+#   Values: a duration          Default: "3h"               Flag: -T, --timeout DURATION
+TIMEOUT="3h"
+
+
+# -----------------------------------------------------------------------------
+# TIMING
+# -----------------------------------------------------------------------------
+
+# INTERVAL
+#   Seconds to wait between checks when there is nothing to do, or after a failed run (the backoff
+#   below may be longer). Waiting uses no tokens.
+#   Values: seconds             Default: 1200 (20 minutes)  Flag: -w, --interval SECONDS
+INTERVAL=1200
+
+# AFTER_RUN
+#   Seconds to wait after a good run before starting the next one.
+#   Values: seconds             Default: 30                 Flag: -a, --after-run SECONDS
+AFTER_RUN=30
+
+# BACKOFF_STEPS   (config only)
+#   Seconds to wait after the 1st, 2nd, 3rd, and every later failed run in a row, for example when
+#   a usage limit is reached. A good run clears the count. The script cannot see when your plan's
+#   limit resets, so shorten these if it resets sooner, or lengthen them to be more patient.
+#   Example for a limit that resets hourly:   BACKOFF_STEPS=(1800 3600)
+#   Values: an array of seconds Default: (3600 7200 14400 21600), which is 1, 2, 4, then 6 hours
+BACKOFF_STEPS=(3600 7200 14400 21600)
+
+
+# -----------------------------------------------------------------------------
+# WATCHING PROGRESS
+# -----------------------------------------------------------------------------
+# There is no server and nothing to configure. Progress is printed to the terminal and appended to
+# LOG_DIR/build.log (LOG_DIR/supervisor.log when started with -b). Follow it with tail -f, or
+# print the last state, recent tasks, and log tail at any time with ./claude-build.sh -v.
+
+# REDACT_FILES   (config only)
+#   Files whose values (lines like KEY=value) are replaced with [hidden] if they appear in the log
+#   lines that -v prints. Relative to PROJECT_DIR. Only values of 8 or more characters are hidden.
+#   The log file itself is not scrubbed, so keep it out of git and out of screenshots.
+#   Values: an array of paths   Default: (".env.local")
+REDACT_FILES=(".env.local")
+
+
+# -----------------------------------------------------------------------------
+# SAFETY
+# -----------------------------------------------------------------------------
+
+# REQUIRE_GIT   (config only)
+#   1 = refuse to start unless PROJECT_DIR is a git repository, so every task is committed and can
+#       be reverted.
+#   0 = allow a project with no git. Not recommended.
+#   Values: 1 or 0              Default: 1
+REQUIRE_GIT=1
+
+
+# =============================================================================
+# RECIPES: ready-made combinations. Copy the lines you want into the settings above.
+# =============================================================================
+#
+# Cautious: one task at a time, stronger model, check in often
+#   MODEL="opus"
+#   TASKS_PER_RUN=1
+#   AFTER_RUN=10
+#
+# Documentation or writing project on a smaller model
+#   MODEL="haiku"
+#   TASKS_PER_RUN=8
+#   CONTEXT_FILES=("docs/" "STYLE.md")
+#   (and drop the Bash pnpm/node/python entries from ALLOWED_TOOLS)
+#
+# Overnight: long timeout, patient backoff, big batches
+#   TASKS_PER_RUN=10
+#   TIMEOUT="5h"
+#   BACKOFF_STEPS=(3600 7200 14400 21600)
+#
+# Patient with a usage limit that resets hourly
+#   BACKOFF_STEPS=(1800 3600)
+#
+# A long prompt kept in its own file
+#   PROMPT_FILE="prompts/build.txt"
+#   (the file may use {state_file}, {tasks_per_run}, and {context})
+#
+# Two builds in one project at the same time (use separate configs, with different values)
+#   STATE_FILE="docs/PROGRESS.md"
+#   LOG_DIR=".build-docs"
