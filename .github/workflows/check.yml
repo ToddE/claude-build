@@ -1,0 +1,17 @@
+name: Check
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: |
+          bash -n claude-build.sh
+          bash -n install.sh
+          bash -n scripts/release.sh
+      - name: VERSION is set
+        run: grep -Eq '^VERSION="[0-9]+\.[0-9]+\.[0-9]+"' claude-build.sh

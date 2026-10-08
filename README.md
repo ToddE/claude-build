@@ -24,11 +24,13 @@ The quality of the build follows the quality of the plan. A build that starts fr
 
 The full path with claude-skills looks like this:
 
-1. **Plan with claude-skills.** Produce the use cases, requirements, and test cases for your project.
-2. **Collect them in a `PLAN.md`.** Summarize the goals, the order of work, and where each detailed document lives.
-3. **Draft the task table.** `claude-build --init PLAN.md docs/ -m opus -r` writes `BUILD_STATE.md` (see "Before you start"). Questions the plan leaves open are listed in the file, or asked live with `-I`.
-4. **Review the table.** Edit models, effort, order, and the gate rows.
-5. **Build.** `claude-build -b` runs it in the background. Check progress with `-s`.
+1. **Plan with claude-skills.** Produce the PR/FAQ, use cases, functional requirements, test cases, and architecture review for your project.
+2. **Run the `build-plan` skill.** It reads those documents, asks what it still needs (stack, check commands, protected areas, credentials, gates), and writes `BUILD_STATE.md`, `claude-build.conf`, `CLAUDE.md`, a build plan, and an engineering prompt.
+3. **Review the table.** Edit models, effort, order, and the gate rows. Resolve any `## Open questions`.
+4. **Preview.** `claude-build -c claude-build.conf -d <project> -v` shows the model, the prompt, and the allowed commands. Nothing starts.
+5. **Build.** `claude-build ... -b` runs it in the background. Check progress with `-s`.
+
+If you have only a short plan, skip step 2 and use `claude-build --init PLAN.md -r` to draft the table (see "Before you start"). Questions the plan leaves open are listed in the file, or asked live with `-I`.
 
 [examples/PLAN.md](examples/PLAN.md) shows a plan in a structure that turns into a good table: a goal and scope, conventions, a document map, milestones with tasks that each name what to read, a check that proves they are done and a difficulty, review gates, and open decisions. Its task table is [examples/BUILD_STATE.md](examples/BUILD_STATE.md).
 
@@ -91,13 +93,41 @@ You have three ways to get a state file:
 1. **Write it yourself.** Copy [examples/BUILD_STATE.md](examples/BUILD_STATE.md) into your project as `BUILD_STATE.md` and replace the rows with your tasks.
 2. **Have a model draft it with `--init`.** Write your plan in any Markdown file (goals, requirements, the order you want things done), then run:
 
-```
-claude-build -d ~/Workspace/myproject --init PLAN.md -m opus          preview: shows the model, the files it reads, and the prompt. Starts nothing.
-claude-build -d ~/Workspace/myproject --init PLAN.md -m opus -r       run it: one `claude -p` session writes BUILD_STATE.md.
-claude-build -d ~/Workspace/myproject --init PLAN.md -m opus -I -r    interactive: the model asks you questions first.
+**Preview.** Shows the model, the files it reads, and the prompt. Starts nothing.
+
+```bash
+claude-build -d ~/Workspace/myproject --init PLAN.md -m opus
 ```
 
-Plan paths go after `--init` or after `-i` (repeatable, files or folders). `--init` follows the same safety rule as the rest of the tool: without `-r` it only previews. With `-r` it starts one session, using the model from `-m` or `MODEL` in the config (and `-e` or `EFFORT`). That session may read the paths you pass and the project's files, and may write only the state file. It gets the table format, and is told to set each task's model and effort by difficulty, group same-model tasks, and add a `GATE` row after each milestone. It starts no task. Opus is a good choice for planning. A cheaper model can draft a simple table.
+**Run it.** One `claude -p` session writes `BUILD_STATE.md`.
+
+```bash
+claude-build -d ~/Workspace/myproject --init PLAN.md -m opus -r
+```
+
+**Interactive.** The model asks you questions first.
+
+```bash
+claude-build -d ~/Workspace/myproject --init PLAN.md -m opus -I -r
+```
+
+What `--init` does, step by step:
+
+1. You give it your plan files, either right after `--init` or with `-i` (repeat `-i` more than once). Files and folders both work.
+2. Without `-r` it only previews. It shows the model, the files it would read, and the exact prompt, and starts nothing.
+3. With `-r` it starts one Claude session to write the file.
+4. The session uses the model from `-m`, or `MODEL` in the config. Set the effort with `-e` or `EFFORT`.
+
+The session is told to:
+
+- read your plan files and the project
+- write `BUILD_STATE.md` and nothing else
+- choose a model and effort level for each task, by how hard the task is
+- put tasks that use the same model next to each other
+- add a `GATE` row after each milestone
+- not start any task
+
+It can read and write files. It cannot run commands. Use Opus for a large or tricky plan. Sonnet is enough for a simple one.
 
 **Best results come from a plan that already answers the scope questions.** Do the questioning upstream, with a planning step such as claude-skills (see "Where the plan comes from"), so that `--init` only has to write the table. The script prints this reminder whenever you use `--init`. Where the plan leaves something unclear, there are two behaviors:
 
@@ -130,8 +160,11 @@ It uses tokens, so before it starts it shows the model, an estimate of the start
 
 Run one of these. Each downloads `install.sh` from this repository and runs it:
 
-```
+```bash
 curl -fsSL https://raw.githubusercontent.com/ToddE/claude-build/main/install.sh | bash
+```
+or
+```bash
 wget -qO- https://raw.githubusercontent.com/ToddE/claude-build/main/install.sh | bash
 ```
 
@@ -155,7 +188,7 @@ Then check it:
 
 ```
 claude-build --version
-claude-build               full help
+claude-build              
 ```
 
 Options are environment variables placed before `bash`:
