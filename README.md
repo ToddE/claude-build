@@ -24,7 +24,7 @@ The full path looks like this:
 
 1. **Plan with claude-skills.** Produce the use cases, requirements, and test cases for your project.
 2. **Collect them in a `PLAN.md`.** Summarize the goals, the order of work, and where each detailed document lives.
-3. **Draft the task table.** `claude-build --init -i PLAN.md -i docs/ -m opus -r` writes `BUILD_STATE.md` (see "Before you start").
+3. **Draft the task table.** `claude-build --init PLAN.md docs/ -m opus -r` writes `BUILD_STATE.md` (see "Before you start"). Questions the plan leaves open are listed in the file, or asked live with `-I`.
 4. **Review the table.** Edit models, effort, order, and the gate rows.
 5. **Build.** `claude-build -b` runs it in the background. Check progress with `-s`.
 
@@ -84,13 +84,21 @@ You have two ways to get a state file:
 2. **Have a model draft it with `--init`.** Write your plan in any Markdown file (goals, requirements, the order you want things done), then run:
 
 ```
-claude-build -d ~/Workspace/myproject --init -i PLAN.md -m opus          preview: shows the model, the files it reads, and the prompt. Starts nothing.
-claude-build -d ~/Workspace/myproject --init -i PLAN.md -m opus -r       run it: one `claude -p` session writes BUILD_STATE.md.
+claude-build -d ~/Workspace/myproject --init PLAN.md -m opus          preview: shows the model, the files it reads, and the prompt. Starts nothing.
+claude-build -d ~/Workspace/myproject --init PLAN.md -m opus -r       run it: one `claude -p` session writes BUILD_STATE.md.
+claude-build -d ~/Workspace/myproject --init PLAN.md -m opus -I -r    interactive: the model asks you questions first.
 ```
 
-`--init` follows the same safety rule as the rest of the tool: without `-r` it only previews. With `-r` it starts one session, using the model from `-m` or `MODEL` in the config (and `-e` or `EFFORT`). That session may read only the paths you pass with `-i` (repeatable), plus the project's files, and may write only the state file. It gets the table format, and is told to set each task's model and effort by difficulty, group same-model tasks, and add a `GATE` row after each milestone. It starts no task. Opus is a good choice for planning. A cheaper model can draft a simple table.
+Plan paths go after `--init` or after `-i` (repeatable, files or folders). `--init` follows the same safety rule as the rest of the tool: without `-r` it only previews. With `-r` it starts one session, using the model from `-m` or `MODEL` in the config (and `-e` or `EFFORT`). That session may read the paths you pass and the project's files, and may write only the state file. It gets the table format, and is told to set each task's model and effort by difficulty, group same-model tasks, and add a `GATE` row after each milestone. It starts no task. Opus is a good choice for planning. A cheaper model can draft a simple table.
 
-The script then checks that the file has `STATUS: ready`, a `NEXT` id, and a task table with `Id` and `Status` columns, and prints the task count. It refuses to run if the state file already exists, so it never overwrites your work.
+**Best results come from a plan that already answers the scope questions.** Do the questioning upstream, with a planning step such as claude-skills (see "Where the plan comes from"), so that `--init` only has to write the table. The script prints this reminder whenever you use `--init`. Where the plan leaves something unclear, there are two behaviors:
+
+| Mode | What happens |
+| --- | --- |
+| Default (`--init -r`) | No one is available to answer, so the model writes its best draft and lists each unclear point under `## Open questions` after the table, with the assumption it made. If it has any, it sets `STATUS: blocked` and the script tells you how many. Answer them by editing the table or the plan, then set `STATUS: ready`. Runs unattended |
+| Interactive (`--init -I -r`) | Starts a normal `claude` session in your terminal. The model reads the plan, asks you what is unclear one question at a time, then writes the file. Needs a terminal, so it cannot run from cron or the background |
+
+The script then checks that the file has `STATUS: ready` (or `blocked` with open questions), a `NEXT` id, and a task table with `Id` and `Status` columns, and prints the task count. It refuses to run if the state file already exists, so it never overwrites your work.
 
 **Read and edit the result before you run the build.** The table drives every run, and a vague task wastes a session.
 
@@ -296,9 +304,11 @@ There is no flag to ask for a preview. When you pass flags but not `-r`, `-b`, `
 #### `-h`, `--help`
 Print the full help. The same text appears when you run with no arguments.
 
-#### `--init`
+#### `--init [PATH...]`, `-I`, `--interactive`
 
-Draft the state file from your plan (section 1, "Before you start"). Long form only. Alone it previews: the model, the effort, the paths it will read, the file it will write, and the exact prompt. With `-r` it runs one planning session. Pass the plan with `-i PATH` (repeatable) or `CONTEXT_FILES` in the config, choose the model with `-m` or `MODEL`, and the output file with `-S`. It cannot be combined with `-b`, `-o`, `-s`, or `-k`, and it never overwrites an existing state file. The session may use only `Read`, `Glob`, `Grep`, and `Write`, so it cannot run commands.
+Draft the state file from your plan (section 1, "Before you start"). `--init` is long form only. Alone it previews: the model, the effort, the paths it will read, the file it will write, whether it will ask questions, and the exact prompt. With `-r` it runs one planning session. Pass the plan as paths after `--init` or with `-i PATH` (repeatable), or set `CONTEXT_FILES` in the config. Choose the model with `-m` or `MODEL`, and the output file with `-S`. It cannot be combined with `-b`, `-o`, `-s`, or `-k`, and it never overwrites an existing state file. The session may use only `Read`, `Glob`, `Grep`, and `Write`, so it cannot run commands.
+
+Unclear points are written under `## Open questions` and the state is set to `blocked`. `-I` (`--interactive`, only with `--init`) starts an interactive session that asks you the questions instead. Answering them in the plan beforehand gives the best table.
 
 #### `--version`
 
@@ -447,6 +457,7 @@ claude-build -d ~/Workspace/blog -S docs/PROGRESS.md -i docs/ -r      no config 
 | -b | --background | off |
 | -k | --stop | off |
 | -h | --help | |
+| -I | --interactive | off. With `--init`, ask questions in the terminal |
 | | --init | off. Draft the state file from the `-i` paths. Preview unless `-r` |
 | | --version | |
 | -c | --config FILE | claude-build.conf beside the script |

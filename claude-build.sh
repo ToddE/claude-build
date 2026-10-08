@@ -40,7 +40,7 @@ REQUIRE_GIT=1
 REDACT_FILES=(".env.local")
 CONFIG=""              # chosen below: -c, else ./claude-build.conf in the current folder, else the one beside this script
 CONFIG_GIVEN=0
-ONCE=0; RUN=0; VIEW=0; BACKGROUND=0; STOPIT=0; VERBOSE=0; INIT=0   # VIEW = status-only mode (-s), INIT = plan mode (--init)
+ONCE=0; RUN=0; VIEW=0; BACKGROUND=0; STOPIT=0; VERBOSE=0; INIT=0; ASK=0; POSITIONAL=()   # VIEW = status-only mode (-s), INIT = plan mode (--init), ASK = interactive plan mode (-I)
 
 # Bundled short flags: -rv is -r -v, and -vrc FILE is -v -r -c FILE. Letters that take a value must come last in a bundle.
 expand_flags() {
@@ -54,7 +54,7 @@ expand_flags() {
         for ((i=0;i<${#letters};i++)); do
           ch="${letters:i:1}"; last=$(( i == ${#letters}-1 ))
           case "$ch" in
-            [robksvhn]) EXPANDED+=("-$ch") ;;
+            [robksvhnI]) EXPANDED+=("-$ch") ;;
             [cdSPfimMtTwale]) EXPANDED+=("-$ch"); if [ $last -eq 1 ]; then needs_value=1; else echo "In $a, -$ch takes a value, so it must be the last letter of the bundle (for example -vrc FILE)."; exit 64; fi ;;
             *) echo "unknown option: -$ch in $a (try -h)"; exit 64 ;;
           esac
@@ -79,7 +79,9 @@ MODES
   -b                  really run, in the background, then return to the terminal
   -o                  run one cycle, then exit (for cron or a timer)
   -k                  stop the background build
-  --init              draft the state file from your plan with a model (-i PLAN.md). A preview until you add -r
+  --init PLAN.md      draft the state file from your plan with a model. A preview until you add -r.
+                      Unclear points go under "## Open questions" (STATUS: blocked). Add -I to be asked
+                      instead, in this terminal. Best results: answer scope questions upstream, in the plan
   -v                  verbose, added to a preview or any run flag: print the state report first, and
                       with -r or -o show the model's output live as well as logging it
   Nothing is ever started unless you pass -r, -b, or -o. Pick only one of those three.
@@ -141,7 +143,8 @@ FLAGS  (a flag overrides the config file, which overrides the built-in default)
   -l, --log-dir DIR          logs, lock, and stop file         [$LOG_DIR]
   -h, --help                 show this text
       --version              print the version and exit
-      --init                 draft the state file from the -i paths with the -m model. Add -r to run it
+      --init [PATH...]       draft the state file from the plan paths (or -i) with the -m model. Add -r to run it
+  -I, --interactive          with --init: the model asks you questions in this terminal first
 
 PROMPT PLACEHOLDERS
   {state_file}   the state file name
@@ -261,10 +264,18 @@ while [ $# -gt 0 ]; do
     -k|--stop) STOPIT=1; shift ;;
     -h|--help) usage; exit 0 ;;
     --init) INIT=1; shift ;;
+    -I|--interactive) ASK=1; shift ;;
     --version) echo "$NAME $VERSION"; exit 0 ;;
-    *) echo "unknown option: $1 (try -h)"; exit 64 ;;
+    -*) echo "unknown option: $1 (try -h)"; exit 64 ;;
+    *) POSITIONAL+=("$1"); shift ;;   # a plan path after --init, checked below
   esac
 done
+if [ ${#POSITIONAL[@]} -gt 0 ]; then
+  if [ $INIT -eq 0 ]; then echo "unexpected argument: ${POSITIONAL[0]} (plan files go after --init, or use -i PATH)"; exit 64; fi
+  [ $CTX_FROM_FLAG -eq 0 ] && CONTEXT_FILES=() && CTX_FROM_FLAG=1
+  CONTEXT_FILES+=("${POSITIONAL[@]}")
+fi
+[ $ASK -eq 1 ] && [ $INIT -eq 0 ] && { echo "-I (interactive) is only for --init."; exit 64; }
 
 # Flags that do not make sense together are an error.
 if [ $(( RUN + BACKGROUND + ONCE )) -gt 1 ]; then echo "Choose one of -r (run here), -b (run in the background), or -o (one cycle)."; exit 64; fi
@@ -285,7 +296,7 @@ LOG="$LOG_DIR/build.log"; LOCK="$LOG_DIR/build.lock"; BACKOFF="$LOG_DIR/backoff_
 
 proj_path() { case "$1" in /*) printf %s "$1" ;; *) printf %s "$PWD/$1" ;; esac; }   # absolute path for a project-relative one
 stamp() { date '+%H:%M:%S'; }
-say()   { echo "[$(stamp)] $*"; mkdir -p "$LOG_DIR"; echo "$(date -Is) $*" >> "$LOG"; }
+log_msg()   { echo "[$(stamp)] $*"; mkdir -p "$LOG_DIR"; echo "$(date -Is) $*" >> "$LOG"; }
 state() { grep -m1 "^$1:" "$STATE_FILE" | sed "s/^$1: *//"; }
 self_cmd() { local c="$SCRIPT_PATH"; [ "$(readlink -f "$(command -v "$NAME" 2>/dev/null)" 2>/dev/null)" = "$SCRIPT_PATH" ] && c="$NAME"; echo "$c$([ "$CONFIG_USED" != "none found" ] && echo " -c $CONFIG_USED")"; }   # how to call this script again with the same config
 # Is the process in pid file $1 running AND really ours? $2 is text its command line must contain.
@@ -390,7 +401,17 @@ Rules:
 - Put tasks that use the same model next to each other when the order allows, because one session handles consecutive tasks that name the same model.
 - Add a row whose Task begins with GATE after each milestone. Leave its Model and Effort empty. A session that reaches it sets STATUS to gate and stops for a person to review.
 - Ids are unique and increase in the order the tasks run.
+
+Questions:
 END_OF_INIT
+  if [ $ASK -eq 1 ]; then cat <<END_OF_ASK
+- First read the paths. Then ask me what is unclear, one question at a time, only where the answer would change the scope, the order, or the choice of model. Do not ask about anything the paths already answer. When I have answered, write ${STATE_FILE}.
+END_OF_ASK
+  else cat <<END_OF_NOASK
+- Nobody is available to answer questions during this session. Do not guess silently. Write your best draft. Under a heading "## Open questions" after the table, list each unclear point as a numbered item, with the assumption you made. Only list questions where the answer would change the scope, the order, or the choice of model, and do not repeat what the paths already answer.
+- If you listed any open questions, set STATUS to blocked and BLOCKED_REASON to "Answer the open questions in this file, then set STATUS to ready". If you have none, leave STATUS ready.
+END_OF_NOASK
+  fi
 }
 init_effort() { local kv; INIT_EFFORT="$EFFORT"; if [ "$EFFORT_FROM_STATE" -eq 1 ]; then for kv in "${EFFORT_DEFAULTS[@]+"${EFFORT_DEFAULTS[@]}"}"; do [ "${kv%%=*}" = "$MODEL" ] && INIT_EFFORT="${kv#*=}"; done; fi; }
 if [ $INIT -eq 1 ]; then
@@ -401,8 +422,10 @@ if [ $INIT -eq 1 ]; then
     echo "model:     $MODEL, effort ${INIT_EFFORT:-default}   (set with -m and -e, or MODEL and EFFORT in the config)"
     echo "reads:     ${CONTEXT_FILES[*]:-none}   (set with -i PATH, repeatable)"
     for c in "${CONTEXT_FILES[@]+"${CONTEXT_FILES[@]}"}"; do [ -e "$c" ] || echo "  warning: path not found: $c"; done
+    echo "asking:    $([ $ASK -eq 1 ] && echo "yes, an interactive session in this terminal (-I): it asks you questions, then writes the file" || echo "no. Unclear points are written under \"## Open questions\" and STATUS is set to blocked. Add -I to be asked instead")"
     echo "allowed:   ${INIT_TOOLS[*]}"; echo "prompt:"; init_prompt | fold -s -w 100 | sed 's/^/  /'; echo
     echo "To start: add -r. Then review $STATE_FILE before you run the build."
+    echo "Tip: the best results come from a plan that already answers the scope questions. Do the questioning upstream (see Where the plan comes from in the README), then --init only has to write the table."
     exit 0
   fi
   [ -f "$STATE_FILE" ] && { echo "$STATE_FILE already exists in $(pwd). --init will not overwrite it. Move it, or choose another name with -S."; exit 64; }
@@ -411,20 +434,32 @@ if [ $INIT -eq 1 ]; then
   [ $found -eq 1 ] || { echo "None of these paths exist in $(pwd): ${CONTEXT_FILES[*]}"; exit 64; }
   if [ "$REQUIRE_GIT" -eq 1 ] && [ ! -d .git ]; then echo "cannot run: run git init first so each task is checkpointed"; exit 1; fi
   mkdir -p "$LOG_DIR"
-  cmd=(-p "$(init_prompt)" --model "$MODEL" --permission-mode "$PERMISSION_MODE" --output-format text)
-  [ -n "$INIT_EFFORT" ] && cmd+=(--effort "$INIT_EFFORT")
-  cmd+=(--allowedTools "${INIT_TOOLS[@]}")
-  [ ${#EXTRA_CLAUDE_ARGS[@]} -gt 0 ] && cmd+=("${EXTRA_CLAUDE_ARGS[@]}")
-  say "planning: drafting $STATE_FILE on $MODEL, effort ${INIT_EFFORT:-default}, from ${CONTEXT_FILES[*]}"
-  if [ $VERBOSE -eq 1 ]; then timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" 2>&1 | tee -a "$LOG"; code=${PIPESTATUS[0]}
-  else timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" >> "$LOG" 2>&1; code=$?; fi
-  [ $code -eq 0 ] || { say "planning failed (code $code). See $LOG"; exit 1; }
-  [ -f "$STATE_FILE" ] || { say "planning finished but $STATE_FILE was not created. See $LOG"; exit 1; }
-  read -r done_n total <<< "$(task_counts)"
-  if [ "$(state STATUS)" != "ready" ] || [ -z "$(state NEXT)" ] || [ "$total" -eq 0 ]; then
-    say "$STATE_FILE was written but is not valid (it needs STATUS: ready, a NEXT id, and a task table with Id and Status columns). Edit it, or delete it and try again. See $LOG"; exit 1
+  common=(--model "$MODEL" --permission-mode "$PERMISSION_MODE")
+  [ -n "$INIT_EFFORT" ] && common+=(--effort "$INIT_EFFORT")
+  common+=(--allowedTools "${INIT_TOOLS[@]}")
+  [ ${#EXTRA_CLAUDE_ARGS[@]} -gt 0 ] && common+=("${EXTRA_CLAUDE_ARGS[@]}")
+  echo "Tip: a plan that already answers the scope questions gives the best table. Do the questioning upstream when you can."
+  if [ $ASK -eq 1 ]; then
+    [ -t 0 ] && [ -t 1 ] || { echo "-I needs a terminal. Run it from an interactive shell, or drop -I."; exit 64; }
+    log_msg "planning (interactive): drafting $STATE_FILE on $MODEL, effort ${INIT_EFFORT:-default}, from ${CONTEXT_FILES[*]}"
+    "$CLAUDE_BIN" "$(init_prompt)" "${common[@]}"; code=$?
+  else
+    log_msg "planning: drafting $STATE_FILE on $MODEL, effort ${INIT_EFFORT:-default}, from ${CONTEXT_FILES[*]}"
+    if [ $VERBOSE -eq 1 ]; then timeout "$TIMEOUT" "$CLAUDE_BIN" -p "$(init_prompt)" --output-format text "${common[@]}" 2>&1 | tee -a "$LOG"; code=${PIPESTATUS[0]}
+    else timeout "$TIMEOUT" "$CLAUDE_BIN" -p "$(init_prompt)" --output-format text "${common[@]}" >> "$LOG" 2>&1; code=$?; fi
   fi
-  say "wrote $STATE_FILE: $total tasks, first task $(state NEXT)"
+  [ $code -eq 0 ] || { log_msg "planning failed (code $code). See $LOG"; exit 1; }
+  [ -f "$STATE_FILE" ] || { log_msg "planning finished but $STATE_FILE was not created. See $LOG"; exit 1; }
+  read -r done_n total <<< "$(task_counts)"
+  st=$(state STATUS)
+  if { [ "$st" != "ready" ] && [ "$st" != "blocked" ]; } || [ -z "$(state NEXT)" ] || [ "$total" -eq 0 ]; then
+    log_msg "$STATE_FILE was written but is not valid (it needs STATUS ready or blocked, a NEXT id, and a task table with Id and Status columns). Edit it, or delete it and try again. See $LOG"; exit 1
+  fi
+  log_msg "wrote $STATE_FILE: $total tasks, first task $(state NEXT)"
+  if [ "$st" = "blocked" ]; then
+    nq=$(awk '/^## Open questions/{f=1;next} /^#/{f=0} f&&/^[0-9]+[.)]/{n++} END{print n+0}' "$STATE_FILE")
+    echo "The model left $nq open question(s) in $STATE_FILE and set STATUS: blocked. Answer them (edit the table or the plan), then set STATUS: ready."
+  fi
   echo "Review and edit $STATE_FILE now. It decides the model, effort, and order of every run."
   echo "Then preview with:  $(self_cmd) -v"
   echo "and start with:     $(self_cmd) -b"
@@ -504,14 +539,14 @@ if [ $VERBOSE -eq 1 ]; then show_state; echo; fi
 mkdir -p "$LOG_DIR"
 if alive "$LOCK" claude-build; then echo "already running (pid $(cat "$LOCK"))"; exit 0; fi
 echo $$ > "$LOCK"
-cleanup() { rm -f "$LOCK"; say "stopped"; }
+cleanup() { rm -f "$LOCK"; log_msg "stopped"; }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 rm -f "$STOP"
 
 # One bounded model run. Returns 0 if it finished, 1 if the build cannot start, anything else if it failed.
 resume_build() {
-  if [ "$REQUIRE_GIT" -eq 1 ] && [ ! -d .git ]; then say "cannot run: run git init first so each task is checkpointed"; return 1; fi
+  if [ "$REQUIRE_GIT" -eq 1 ] && [ ! -d .git ]; then log_msg "cannot run: run git init first so each task is checkpointed"; return 1; fi
   local -a cmd=(); while IFS= read -r -d '' a; do cmd+=("$a"); done < <(claude_args)
   local code
   if [ $VERBOSE -eq 1 ]; then   # verbose: show the model's output live as well as logging it
@@ -524,30 +559,30 @@ resume_build() {
     echo $n > "$FAILS"; idx=$(( n-1 )); [ $idx -ge ${#BACKOFF_STEPS[@]} ] && idx=$(( ${#BACKOFF_STEPS[@]} - 1 ))
     wait=${BACKOFF_STEPS[$idx]}
     echo $(( $(date +%s) + wait )) > "$BACKOFF"
-    say "run failed (code $code). Backing off $(( wait/60 )) min"
+    log_msg "run failed (code $code). Backing off $(( wait/60 )) min"
     return $code
   fi
-  rm -f "$FAILS" "$BACKOFF"; say "run finished"; return 0
+  rm -f "$FAILS" "$BACKOFF"; log_msg "run finished"; return 0
 }
 
-say "started ($PROJECT_NAME in $(pwd)). Checking every $(( INTERVAL/60 )) min. See progress: tail -f $(proj_path "$LOG")   or   $(self_cmd) -s"
-say "stop with Ctrl+C, $(self_cmd) -k, or: touch $(proj_path "$STOP")"
+log_msg "started ($PROJECT_NAME in $(pwd)). Checking every $(( INTERVAL/60 )) min. See progress: tail -f $(proj_path "$LOG")   or   $(self_cmd) -s"
+log_msg "stop with Ctrl+C, $(self_cmd) -k, or: touch $(proj_path "$STOP")"
 NO_PROGRESS=0
 while true; do
-  [ -f "$STOP" ] && { say "stop file found"; exit 0; }
+  [ -f "$STOP" ] && { log_msg "stop file found"; exit 0; }
   status=$(state STATUS); next=$(state NEXT); read -r done_n total <<< "$(task_counts)"
   case "$status" in
-    done)    say "build complete ($done_n/$total tasks)"; exit 0 ;;
-    blocked) say "BLOCKED: $(state BLOCKED_REASON). Fix it, then set STATUS: ready"; exit 2 ;;
-    gate)    say "at a gate ($done_n/$total done). Review, then set STATUS: ready"; exit 3 ;;
+    done)    log_msg "build complete ($done_n/$total tasks)"; exit 0 ;;
+    blocked) log_msg "BLOCKED: $(state BLOCKED_REASON). Fix it, then set STATUS: ready"; exit 2 ;;
+    gate)    log_msg "at a gate ($done_n/$total done). Review, then set STATUS: ready"; exit 3 ;;
     ready)   ;;
-    *)       say "unknown STATUS '$status' in $STATE_FILE"; exit 64 ;;
+    *)       log_msg "unknown STATUS '$status' in $STATE_FILE"; exit 64 ;;
   esac
   if [ -f "$BACKOFF" ] && [ "$(date +%s)" -lt "$(cat "$BACKOFF")" ]; then
-    say "waiting until $(date -d @"$(cat "$BACKOFF")" '+%H:%M') after a failed run ($done_n/$total done, next $next)"
+    log_msg "waiting until $(date -d @"$(cat "$BACKOFF")" '+%H:%M') after a failed run ($done_n/$total done, next $next)"
   else
     plan_run "$next"
-    say "running: next task $next on $RUN_MODEL, effort ${RUN_EFFORT:-default} ($done_n/$total done)"
+    log_msg "running: next task $next on $RUN_MODEL, effort ${RUN_EFFORT:-default} ($done_n/$total done)"
     resume_build; rc=$?
     [ $rc -eq 1 ] && exit 1
     if [ $rc -eq 0 ]; then
@@ -555,11 +590,11 @@ while true; do
       read -r done_after total_after <<< "$(task_counts)"
       if [ "$done_after" = "$done_n" ] && [ "$(state NEXT)" = "$next" ] && [ "$(state STATUS)" = "ready" ]; then
         NO_PROGRESS=$(( NO_PROGRESS + 1 ))
-        say "no task finished in that run ($NO_PROGRESS of 2 allowed)"
+        log_msg "no task finished in that run ($NO_PROGRESS of 2 allowed)"
         if [ $NO_PROGRESS -ge 2 ]; then
           reason="Two runs finished without completing a task. See $LOG."; reason=${reason//\\/\\\\}; reason=${reason//&/\\&}; reason=${reason//|/\\|}
           sed -i "s|^STATUS:.*|STATUS: blocked|; s|^BLOCKED_REASON:.*|BLOCKED_REASON: $reason|" "$STATE_FILE"
-          say "BLOCKED: two runs made no progress. See $LOG"; exit 2
+          log_msg "BLOCKED: two runs made no progress. See $LOG"; exit 2
         fi
       else NO_PROGRESS=0; fi
       [ "$ONCE" -eq 0 ] && { sleep "$AFTER_RUN" & wait $!; continue; }
