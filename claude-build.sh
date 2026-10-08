@@ -3,11 +3,12 @@
 # Run it with no arguments for the full help. With flags but no -r, -b, or -o it only previews.
 # Pure bash. Progress goes to the terminal and to a log file. Settings: defaults below,
 # then claude-build.conf, then command-line flags. See README.md in this folder.
+
+# Author: Todd Emerson (github: ToddE) with coding assistance from Claude Code Sonnet 5.5
 set -u
 VERSION="0.1.0"
 
-# Where this script really lives (symlinks followed) and where the command was typed.
-# Nothing here assumes the command is run from the project folder.
+# Where the script lives (symlinks followed) and where the command was typed.
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 ORIG_PWD="$PWD"
 NAME="$(basename "$0")"   # the name you typed, such as claude-build
@@ -39,7 +40,7 @@ REQUIRE_GIT=1
 REDACT_FILES=(".env.local")
 CONFIG=""              # chosen below: -c, else ./claude-build.conf in the current folder, else the one beside this script
 CONFIG_GIVEN=0
-ONCE=0; RUN=0; VIEW=0; BACKGROUND=0; STOPIT=0; VERBOSE=0   # VIEW = status-only mode (-s)
+ONCE=0; RUN=0; VIEW=0; BACKGROUND=0; STOPIT=0; VERBOSE=0; INIT=0   # VIEW = status-only mode (-s), INIT = plan mode (--init)
 
 # Bundled short flags: -rv is -r -v, and -vrc FILE is -v -r -c FILE. Letters that take a value must come last in a bundle.
 expand_flags() {
@@ -78,6 +79,7 @@ MODES
   -b                  really run, in the background, then return to the terminal
   -o                  run one cycle, then exit (for cron or a timer)
   -k                  stop the background build
+  --init              draft the state file from your plan with a model (-i PLAN.md). A preview until you add -r
   -v                  verbose, added to a preview or any run flag: print the state report first, and
                       with -r or -o show the model's output live as well as logging it
   Nothing is ever started unless you pass -r, -b, or -o. Pick only one of those three.
@@ -139,6 +141,7 @@ FLAGS  (a flag overrides the config file, which overrides the built-in default)
   -l, --log-dir DIR          logs, lock, and stop file         [$LOG_DIR]
   -h, --help                 show this text
       --version              print the version and exit
+      --init                 draft the state file from the -i paths with the -m model. Add -r to run it
 
 PROMPT PLACEHOLDERS
   {state_file}   the state file name
@@ -257,15 +260,18 @@ while [ $# -gt 0 ]; do
     -b|--background) BACKGROUND=1; shift ;;
     -k|--stop) STOPIT=1; shift ;;
     -h|--help) usage; exit 0 ;;
+    --init) INIT=1; shift ;;
     --version) echo "$NAME $VERSION"; exit 0 ;;
     *) echo "unknown option: $1 (try -h)"; exit 64 ;;
   esac
 done
 
-# Flags that do not make sense together are an error, not a hidden precedence.
+# Flags that do not make sense together are an error.
 if [ $(( RUN + BACKGROUND + ONCE )) -gt 1 ]; then echo "Choose one of -r (run here), -b (run in the background), or -o (one cycle)."; exit 64; fi
 if [ $STOPIT -eq 1 ] && [ $(( RUN + BACKGROUND + ONCE + VIEW )) -gt 0 ]; then echo "-k (stop) cannot be combined with -r, -b, -o, or -s."; exit 64; fi
 if [ $VIEW -eq 1 ] && [ $(( RUN + BACKGROUND + ONCE )) -gt 0 ]; then echo "-s (status) cannot be combined with -r, -b, or -o. Add -v to a run flag to see the state before it starts."; exit 64; fi
+
+if [ $INIT -eq 1 ] && [ $(( BACKGROUND + ONCE + VIEW + STOPIT )) -gt 0 ]; then echo "--init cannot be combined with -b, -o, -s, or -k. Use --init alone to preview, or --init -r to write the state file."; exit 64; fi
 
 # ---------- find and enter the project ----------
 if [ -z "$PROJECT_DIR" ]; then
@@ -274,7 +280,7 @@ if [ -z "$PROJECT_DIR" ]; then
 fi
 [ -d "$PROJECT_DIR" ] || { echo "project folder not found: $PROJECT_DIR"; exit 64; }
 cd "$PROJECT_DIR" || exit 64
-[ -f "$STATE_FILE" ] || { echo "state file not found: $STATE_FILE (looked in $(pwd)). It needs STATUS, NEXT, and a task table. See README.md, section 4."; exit 64; }
+[ -f "$STATE_FILE" ] || [ $INIT -eq 1 ] || { echo "state file not found: $STATE_FILE (looked in $(pwd)). It needs STATUS, NEXT, and a task table. See README.md, section 4. To have a model draft one from your plan: $NAME --init -i PLAN.md"; exit 64; }
 LOG="$LOG_DIR/build.log"; LOCK="$LOG_DIR/build.lock"; BACKOFF="$LOG_DIR/backoff_until"; FAILS="$LOG_DIR/failures"; STOP="$LOG_DIR/stop"
 
 proj_path() { case "$1" in /*) printf %s "$1" ;; *) printf %s "$PWD/$1" ;; esac; }   # absolute path for a project-relative one
@@ -358,6 +364,73 @@ claude_args() {
   [ ${#EXTRA_CLAUDE_ARGS[@]} -gt 0 ] && printf '%s\0' "${EXTRA_CLAUDE_ARGS[@]}"
 }
 
+# ---------- --init: have a model draft the state file from your plan (a preview unless -r is given) ----------
+init_prompt() {
+  local srcs="${CONTEXT_FILES[*]}"
+  cat <<END_OF_INIT
+You are planning a long build that claude-build will run later, one bounded session at a time. Read these paths: ${srcs}. Then create the file ${STATE_FILE} in the current folder. Do not start any task. Do not create or change any other file.
+
+${STATE_FILE} must follow this format exactly:
+
+# Build state
+
+STATUS: ready
+NEXT: <the Id of the first task>
+BLOCKED_REASON:
+
+| Id | Milestone | Task | Model | Effort | Status | Commit | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1.1 | M1 Name | What to do, which file to read, and the check that proves it is done | haiku | | todo | | |
+
+Rules:
+- Every row has Status todo. Leave Commit and Notes empty.
+- Task: one sitting of work. Name the file or section to read and a check that proves it is done, such as a command that passes or a file that exists. A later session sees only this row, the project files, and the repository.
+- Model is haiku, sonnet, or opus. Use haiku for mechanical work, sonnet for most implementation and writing, and opus for design, hard debugging, and decisions that are costly to redo.
+- Effort is low, medium, high, xhigh, or max. Leave it empty unless the default for the model (opus high, sonnet medium, haiku low) is wrong for that task.
+- Put tasks that use the same model next to each other when the order allows, because one session handles consecutive tasks that name the same model.
+- Add a row whose Task begins with GATE after each milestone. Leave its Model and Effort empty. A session that reaches it sets STATUS to gate and stops for a person to review.
+- Ids are unique and increase in the order the tasks run.
+END_OF_INIT
+}
+init_effort() { local kv; INIT_EFFORT="$EFFORT"; if [ "$EFFORT_FROM_STATE" -eq 1 ]; then for kv in "${EFFORT_DEFAULTS[@]+"${EFFORT_DEFAULTS[@]}"}"; do [ "${kv%%=*}" = "$MODEL" ] && INIT_EFFORT="${kv#*=}"; done; fi; }
+if [ $INIT -eq 1 ]; then
+  init_effort; INIT_TOOLS=("Read" "Glob" "Grep" "Write")
+  if [ $RUN -eq 0 ]; then
+    echo "PREVIEW ONLY. Nothing was started."; echo "mode:      --init (draft the state file from your plan)"; echo "config:    $CONFIG_USED"; echo "project:   $(pwd)"
+    echo "writes:    $STATE_FILE$([ -f "$STATE_FILE" ] && echo "   (ALREADY EXISTS: --init -r will refuse)")"
+    echo "model:     $MODEL, effort ${INIT_EFFORT:-default}   (set with -m and -e, or MODEL and EFFORT in the config)"
+    echo "reads:     ${CONTEXT_FILES[*]:-none}   (set with -i PATH, repeatable)"
+    for c in "${CONTEXT_FILES[@]+"${CONTEXT_FILES[@]}"}"; do [ -e "$c" ] || echo "  warning: path not found: $c"; done
+    echo "allowed:   ${INIT_TOOLS[*]}"; echo "prompt:"; init_prompt | fold -s -w 100 | sed 's/^/  /'; echo
+    echo "To start: add -r. Then review $STATE_FILE before you run the build."
+    exit 0
+  fi
+  [ -f "$STATE_FILE" ] && { echo "$STATE_FILE already exists in $(pwd). --init will not overwrite it. Move it, or choose another name with -S."; exit 64; }
+  [ ${#CONTEXT_FILES[@]} -gt 0 ] || { echo "Nothing to read. Pass your plan with -i PATH (repeatable), or set CONTEXT_FILES in the config."; exit 64; }
+  found=0; for c in "${CONTEXT_FILES[@]}"; do [ -e "$c" ] && found=1; done
+  [ $found -eq 1 ] || { echo "None of these paths exist in $(pwd): ${CONTEXT_FILES[*]}"; exit 64; }
+  if [ "$REQUIRE_GIT" -eq 1 ] && [ ! -d .git ]; then echo "cannot run: run git init first so each task is checkpointed"; exit 1; fi
+  mkdir -p "$LOG_DIR"
+  cmd=(-p "$(init_prompt)" --model "$MODEL" --permission-mode "$PERMISSION_MODE" --output-format text)
+  [ -n "$INIT_EFFORT" ] && cmd+=(--effort "$INIT_EFFORT")
+  cmd+=(--allowedTools "${INIT_TOOLS[@]}")
+  [ ${#EXTRA_CLAUDE_ARGS[@]} -gt 0 ] && cmd+=("${EXTRA_CLAUDE_ARGS[@]}")
+  say "planning: drafting $STATE_FILE on $MODEL, effort ${INIT_EFFORT:-default}, from ${CONTEXT_FILES[*]}"
+  if [ $VERBOSE -eq 1 ]; then timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" 2>&1 | tee -a "$LOG"; code=${PIPESTATUS[0]}
+  else timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" >> "$LOG" 2>&1; code=$?; fi
+  [ $code -eq 0 ] || { say "planning failed (code $code). See $LOG"; exit 1; }
+  [ -f "$STATE_FILE" ] || { say "planning finished but $STATE_FILE was not created. See $LOG"; exit 1; }
+  read -r done_n total <<< "$(task_counts)"
+  if [ "$(state STATUS)" != "ready" ] || [ -z "$(state NEXT)" ] || [ "$total" -eq 0 ]; then
+    say "$STATE_FILE was written but is not valid (it needs STATUS: ready, a NEXT id, and a task table with Id and Status columns). Edit it, or delete it and try again. See $LOG"; exit 1
+  fi
+  say "wrote $STATE_FILE: $total tasks, first task $(state NEXT)"
+  echo "Review and edit $STATE_FILE now. It decides the model, effort, and order of every run."
+  echo "Then preview with:  $(self_cmd) -v"
+  echo "and start with:     $(self_cmd) -b"
+  exit 0
+fi
+
 # ---------- -k: stop the background build ----------
 if [ $STOPIT -eq 1 ]; then
   if alive "$LOCK" claude-build; then
@@ -370,7 +443,7 @@ if [ $STOPIT -eq 1 ]; then
   exit 0
 fi
 
-# ---------- the state report: shown by -s, and by -v (verbose) at the start of a preview or run ----------
+# ---------- state report: shown by -s, and by -v (verbose) at the start of a preview or run ----------
 show_state() {
   local done_n total next status reason nrow rd i t
   read -r done_n total <<< "$(task_counts)"; next=$(state NEXT); status=$(state STATUS); reason=$(state BLOCKED_REASON)
@@ -407,7 +480,7 @@ if [ $RUN -eq 0 ] && [ $ONCE -eq 0 ] && [ $BACKGROUND -eq 0 ]; then
   exit 0
 fi
 
-# ---------- -b: start the loop again in a detached session, then return ----------
+# ---------- -b: restart the loop in a detached session, then return ----------
 if [ $BACKGROUND -eq 1 ]; then
   if [ "$REQUIRE_GIT" -eq 1 ] && [ ! -d .git ]; then echo "cannot run: run git init first so each task is checkpointed"; exit 1; fi
   mkdir -p "$LOG_DIR"
