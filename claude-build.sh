@@ -38,7 +38,31 @@ REQUIRE_GIT=1
 REDACT_FILES=(".env.local")
 CONFIG=""              # chosen below: -c, else ./claude-build.conf in the current folder, else the one beside this script
 CONFIG_GIVEN=0
-ONCE=0; RUN=0; VIEW=0; BACKGROUND=0; STOPIT=0
+ONCE=0; RUN=0; VIEW=0; BACKGROUND=0; STOPIT=0; VERBOSE=0   # VIEW = status-only mode (-s)
+
+# Bundled short flags: -rv is -r -v, and -vrc FILE is -v -r -c FILE. Letters that take a value must come last in a bundle.
+expand_flags() {
+  local a letters i ch last needs_value=0; EXPANDED=()
+  for a in "$@"; do
+    if [ $needs_value -eq 1 ]; then EXPANDED+=("$a"); needs_value=0; continue; fi   # the value of the previous flag, copied as written
+    case "$a" in
+      --*|-|-?) EXPANDED+=("$a"); case "$a" in -[cdSPfimMtTwale]) needs_value=1 ;; esac ;;
+      -[A-Za-z][A-Za-z]*)
+        letters="${a#-}"
+        for ((i=0;i<${#letters};i++)); do
+          ch="${letters:i:1}"; last=$(( i == ${#letters}-1 ))
+          case "$ch" in
+            [robksvhn]) EXPANDED+=("-$ch") ;;
+            [cdSPfimMtTwale]) EXPANDED+=("-$ch"); if [ $last -eq 1 ]; then needs_value=1; else echo "In $a, -$ch takes a value, so it must be the last letter of the bundle (for example -vrc FILE)."; exit 64; fi ;;
+            *) echo "unknown option: -$ch in $a (try -h)"; exit 64 ;;
+          esac
+        done ;;
+      *) EXPANDED+=("$a") ;;
+    esac
+  done
+}
+expand_flags "$@"
+set -- "${EXPANDED[@]+"${EXPANDED[@]}"}"
 ORIG_ARGS=("$@")
 
 usage() {
@@ -47,13 +71,17 @@ $NAME: keep a Claude Code build going until it is done, blocked, or at a gate
 
 MODES
   no arguments        this help
-  any flags, no -r/-b/-o  PREVIEW: shows the project, settings, and the exact prompt, and starts nothing
-  -v                  view: print the last state and the end of the log (works after the build ended)
-  -r                  run in this terminal until the build ends or you press Ctrl+C
-  -b                  run in the background, then return to the terminal
+  flags, no -r/-b/-o/-s   PREVIEW: shows the project, settings, and the exact prompt. Starts nothing
+  -s                  status: print the last state and the end of the log (works after the build ended)
+  -r                  really run, in this terminal. Quiet: a line per step
+  -b                  really run, in the background, then return to the terminal
   -o                  run one cycle, then exit (for cron or a timer)
   -k                  stop the background build
-  NOTE: Nothing is ever started unless you pass -r, -b, or -o.
+  -v                  verbose, added to a preview or any run flag: print the state report first, and
+                      with -r or -o show the model's output live as well as logging it
+  Nothing is ever started unless you pass -r, -b, or -o. Pick only one of those three.
+  -k and -s stand alone. Flags can come in any order, and single letters can be bundled:
+  -rv is -r -v, and -vrc FILE is -v -r -c FILE (a letter that takes a value goes last).
 
 WHAT IT DOES
   Reads a state file, and while the status is "ready" runs one bounded Claude Code
@@ -64,30 +92,35 @@ WHAT IT DOES
   A run that finishes no task is counted, and the build stops after two of them.
 
 USAGE
-  $NAME -r [flags]       run in this terminal
-  $NAME -b [flags]       run in the background, then return to the terminal
-  $NAME -o [flags]       one cycle, then exit
-  $NAME -v [flags]       show the last state and the log tail
-  $NAME -k [flags]       stop the background build
-  $NAME [flags]          preview only (flags without -r, -b, or -o)
-  $NAME -h               this text (also shown when run with no arguments)
-  Every flag has a long form too: -r is --run, -o is --once, and so on (see FLAGS).
+  claude-build.sh [flags]          preview only (flags without -r, -b, or -o)
+  claude-build.sh -r [flags]       run in this terminal, quietly
+  claude-build.sh -v -r [flags]    run in this terminal, verbosely
+  claude-build.sh -b [flags]       run in the background, then return to the terminal
+  claude-build.sh -o [flags]       one cycle, then exit
+  claude-build.sh -s [flags]       show the last state and the log tail
+  claude-build.sh -k [flags]       stop the background build
+  claude-build.sh -h               this text (also shown when run with no arguments)
+  Every flag has a long form too: -r is --run, -v is --verbose, and so on (see FLAGS).
 
-EXAMPLES
-  $NAME -c blog.conf             preview using blog.conf
-  $NAME -m opus -t 1             preview a change of model and task count
-  $NAME -r                       run in this terminal. Progress is printed and logged
-  $NAME -b                       run in the background (no & or nohup needed)
-  $NAME -v                       state and log tail, even after the build ended
-  $NAME -k                       stop the background build
-  */30 * * * * $SCRIPT_PATH -o                  (cron)
-  $NAME -r -m opus -t 2 -i docs/spec.md -i docs/api/         force opus for every run
+EXAMPLES  (flags can be combined and come in any order)
+  $NAME -c blog.conf                       preview using blog.conf. Nothing starts
+  $NAME -v -c blog.conf                    verbose preview: the state report, then the settings and prompt
+  $NAME -c blog.conf -r                    really run in this terminal, quietly
+  $NAME -v -c blog.conf -r                 run verbosely: state first, model output live
+  $NAME -c blog.conf -b                    run in the background (the start message shows how to check it)
+  $NAME -c blog.conf -s                    last state and log tail, while it runs in the background or after
+  $NAME -c blog.conf -k                    stop the background build
+  $NAME -c blog.conf -b -m opus -t 2       background, forced to opus, two tasks per run
+  $NAME -c blog.conf -m opus -t 1          preview a change of model and task count
+  $NAME -d ~/Workspace/blog -S docs/PROGRESS.md -i docs/ -r      work in a project with no config file
+  */30 * * * * $SCRIPT_PATH -c /home/you/blog.conf -o            (cron: one cycle every 30 minutes)
 
 FLAGS  (a flag overrides the config file, which overrides the built-in default)
-  -r, --run                  run the loop in this terminal
+  -r, --run                  really run the loop in this terminal (quietly)
   -b, --background           run the loop in the background and return to the terminal
   -o, --once                 one cycle, then exit
-  -v, --view                 print the last state and the log tail. Starts no build
+  -s, --status               print the last state and the log tail. Starts no build
+  -v, --verbose              verbose: state report first, and the model's output live with -r or -o
   -k, --stop                 stop the background build
   -c, --config FILE          settings file (relative to where you run this)  [${CONFIG_USED}]
   -d, --project DIR          project folder (relative to where you run this) [${PROJECT_DIR:-not set}]
@@ -114,12 +147,13 @@ PROMPT PLACEHOLDERS
                  (added automatically at the end if your prompt does not use it)
 
 MODEL AND EFFORT PER TASK
-  With MODEL_FROM_STATE=1 (the default) the script reads the Model column of the NEXT task
-  in the state file and starts the run with that model. Consecutive tasks with the same
-  model share a run. When the next task names a different model the run ends and the
-  script starts a new one. Effort works the same way from an Effort column, else by
-  model (EFFORT_DEFAULTS). A task with no Model cell uses MODEL. -m or -e force one value
-  for every run. No model orchestrates: the script chooses.
+  With MODEL_FROM_STATE=1 (the default) the script reads the Model column of the NEXT
+  task in the state file and starts the run with that model. Consecutive tasks with the
+  same model share a run. When the next task names a different model, the run ends and
+  the script starts a new one. Effort works the same way: the Effort cell of the task,
+  else the model's level in EFFORT_DEFAULTS. A task with no Model cell uses MODEL.
+  -m forces one model for every run (with that model's effort). -e forces one effort.
+  No model orchestrates: the script chooses.
 
 WHERE IT RUNS FROM
   You can run it from any folder. It never assumes the current folder is the project.
@@ -149,7 +183,7 @@ STATE FILE FORMAT  (the only thing a project must provide)
 
 WATCHING PROGRESS
   Progress is printed to the terminal and appended to <project>/$LOG_DIR/build.log
-  (and supervisor.log for -b). Follow it with tail -f, or print the state with -v.
+  (and supervisor.log for -b). Follow it with tail -f, or print the state with -s.
 
 WHEN IT STOPS  (exit code)
   0  the build is done, a stop file was found, or one -o cycle finished
@@ -187,7 +221,7 @@ if [ $CONFIG_GIVEN -eq 0 ]; then
 fi
 if [ -n "$CONFIG" ] && [ -f "$CONFIG" ]; then
   # The config is run as shell, so refuse one that someone else owns or that anyone can write to.
-  if [ "$(stat -c %u "$CONFIG")" != "$(id -u)" ] || [ $(( 0$(stat -c %a "$CONFIG") & 002 )) -ne 0 ]; then
+  if [ "$(stat -L -c %u "$CONFIG")" != "$(id -u)" ] || [ $(( 0$(stat -L -c %a "$CONFIG") & 002 )) -ne 0 ]; then   # -L: judge the real file behind a symlink
     echo "refusing to use $CONFIG: it must be owned by you and not writable by everyone (chmod o-w)"; exit 64
   fi
   source "$CONFIG"
@@ -216,13 +250,19 @@ while [ $# -gt 0 ]; do
     -l|--log-dir) LOG_DIR="$2"; shift 2 ;;
     -r|--run) RUN=1; shift ;;
     -o|--once) ONCE=1; shift ;;
-    -v|--view) VIEW=1; shift ;;
+    -s|--status) VIEW=1; shift ;;
+    -v|--verbose) VERBOSE=1; shift ;;
     -b|--background) BACKGROUND=1; shift ;;
     -k|--stop) STOPIT=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1 (try -h)"; exit 64 ;;
   esac
 done
+
+# Flags that do not make sense together are an error, not a hidden precedence.
+if [ $(( RUN + BACKGROUND + ONCE )) -gt 1 ]; then echo "Choose one of -r (run here), -b (run in the background), or -o (one cycle)."; exit 64; fi
+if [ $STOPIT -eq 1 ] && [ $(( RUN + BACKGROUND + ONCE + VIEW )) -gt 0 ]; then echo "-k (stop) cannot be combined with -r, -b, -o, or -s."; exit 64; fi
+if [ $VIEW -eq 1 ] && [ $(( RUN + BACKGROUND + ONCE )) -gt 0 ]; then echo "-s (status) cannot be combined with -r, -b, or -o. Add -v to a run flag to see the state before it starts."; exit 64; fi
 
 # ---------- find and enter the project ----------
 if [ -z "$PROJECT_DIR" ]; then
@@ -269,7 +309,8 @@ plan_run() {
     [ -n "$m" ] && { RUN_MODEL="$m"; RUN_FROM_STATE=1; }
   fi
   if [ "$EFFORT_FROM_STATE" -eq 1 ]; then
-    e=$(task_cell "$id" Effort | tr 'A-Z' 'a-z' | tr -d '*' | sed 's/[ ,(].*//')
+    # A task's own Effort cell applies only when its model also came from the state file.
+    [ "$RUN_FROM_STATE" -eq 1 ] && e=$(task_cell "$id" Effort | tr 'A-Z' 'a-z' | tr -d '*' | sed 's/[ ,(].*//')
     if [ -z "$e" ]; then for kv in "${EFFORT_DEFAULTS[@]+"${EFFORT_DEFAULTS[@]}"}"; do [ "${kv%%=*}" = "$RUN_MODEL" ] && e="${kv#*=}"; done; fi
     [ -n "$e" ] && RUN_EFFORT="$e"
   fi
@@ -326,8 +367,9 @@ if [ $STOPIT -eq 1 ]; then
   exit 0
 fi
 
-# ---------- -v: print the last state and the end of the log ----------
-if [ $VIEW -eq 1 ]; then
+# ---------- the state report: shown by -s, and by -v (verbose) at the start of a preview or run ----------
+show_state() {
+  local done_n total next status reason nrow rd i t
   read -r done_n total <<< "$(task_counts)"; next=$(state NEXT); status=$(state STATUS); reason=$(state BLOCKED_REASON)
   echo "$PROJECT_NAME build"
   if alive "$LOCK" claude-build; then echo "  build loop: running (pid $(cat "$LOCK"))"; else echo "  build loop: not running"; fi
@@ -335,16 +377,19 @@ if [ $VIEW -eq 1 ]; then
   if [ -f "$BACKOFF" ] && [ "$(date +%s)" -lt "$(cat "$BACKOFF")" ]; then echo "  waiting:    until $(date -d @"$(cat "$BACKOFF")" '+%H:%M') after a failed run"; fi
   nrow=$(awk -F'|' -v id="$next" 'function trim(s){gsub(/^[ \t]+|[ \t]+$/,"",s);return s} /^\|[ \t]*Id[ \t]*\|/{for(i=2;i<NF;i++)if(tolower(trim($i))=="task")tc=i;h=1;next} h&&trim($2)==id{print trim($tc);exit}' "$STATE_FILE")
   echo "  next:       ${next:--}${nrow:+  $nrow}"
+  plan_run "$next"; echo "  next run:   on $RUN_MODEL, effort ${RUN_EFFORT:-default}"
   echo "  tasks:      $done_n of $total done"
   rd=$(recent_done 5); if [ -n "$rd" ]; then echo "  recent:"; while IFS='|' read -r i t; do echo "    $i  $t"; done <<< "$rd"; fi
   echo; echo "log, last 15 lines ($(proj_path "$LOG")):"
   if [ -f "$LOG" ]; then tail -n 15 "$LOG" | redact_log | sed 's/^/  /'; else echo "  no log yet"; fi
   echo; echo "follow it live: tail -f $(proj_path "$LOG")"
-  exit 0
-fi
+}
+# -s: print the report and exit.
+if [ $VIEW -eq 1 ]; then show_state; exit 0; fi
 
 # ---------- preview (flags without -r, -b, or -o) ----------
 if [ $RUN -eq 0 ] && [ $ONCE -eq 0 ] && [ $BACKGROUND -eq 0 ]; then
+  if [ $VERBOSE -eq 1 ]; then show_state; echo; fi
   echo "PREVIEW ONLY. Nothing was started."; echo "config:    $CONFIG_USED"; echo "project:   $(pwd)"; echo "state:     $STATE_FILE   ($(task_counts) done/total)"
   plan_run "$(state NEXT)"
   echo "settings:  mode=$PERMISSION_MODE tasks/run=$TASKS_PER_RUN timeout=$TIMEOUT interval=${INTERVAL}s after-run=${AFTER_RUN}s"
@@ -355,7 +400,7 @@ if [ $RUN -eq 0 ] && [ $ONCE -eq 0 ] && [ $BACKGROUND -eq 0 ]; then
   for c in "${CONTEXT_FILES[@]+"${CONTEXT_FILES[@]}"}"; do [ -e "$c" ] || echo "  warning: context path not found: $c"; done
   echo "allowed:   ${ALLOWED_TOOLS[*]}"; echo "prompt:"; build_prompt | fold -s -w 100 | sed 's/^/  /'; echo
   echo "To start: add -r (run in this terminal), -b (run in the background), or -o (one cycle)."
-  echo "To see the last state and the log tail without running anything: -v"
+  echo "To see the last state and the log tail without running anything: -s.  For a verbose run: -v -r"
   exit 0
 fi
 
@@ -363,20 +408,23 @@ fi
 if [ $BACKGROUND -eq 1 ]; then
   if [ "$REQUIRE_GIT" -eq 1 ] && [ ! -d .git ]; then echo "cannot run: run git init first so each task is checkpointed"; exit 1; fi
   mkdir -p "$LOG_DIR"
-  if alive "$LOCK" claude-build; then echo "Already running (pid $(cat "$LOCK")). Stop it with -k, or look at it with -v."; exit 0; fi
-  pass=(); for a in "${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}"; do case "$a" in -b|--background) ;; *) pass+=("$a") ;; esac; done
+  if alive "$LOCK" claude-build; then echo "Already running (pid $(cat "$LOCK")). Stop it with -k, or look at it with -s."; exit 0; fi
+  if [ $VERBOSE -eq 1 ]; then show_state; echo; fi
+  pass=(); for a in "${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}"; do case "$a" in -b|--background|-v|--view) ;; *) pass+=("$a") ;; esac; done
   setsid -f "$SCRIPT_PATH" "${pass[@]+"${pass[@]}"}" -r >> "$LOG_DIR/supervisor.log" 2>&1 < /dev/null
   sleep 2
   if alive "$LOCK" claude-build; then
     echo "Started in the background (pid $(cat "$LOCK")) for $PROJECT_NAME in $(pwd)"
     echo "  watch:  tail -f $(proj_path "$LOG_DIR")/supervisor.log"
-    echo "  state:  $(self_cmd) -v"
+    echo "  state:  $(self_cmd) -s"
     echo "  stop:   $(self_cmd) -k"
   else echo "It did not stay running. See $(proj_path "$LOG_DIR")/supervisor.log"; exit 1; fi
   exit 0
 fi
 
 # ---------- run: one copy at a time ----------
+# The report comes first, so it shows the state before this run takes the lock.
+if [ $VERBOSE -eq 1 ]; then show_state; echo; fi
 mkdir -p "$LOG_DIR"
 if alive "$LOCK" claude-build; then echo "already running (pid $(cat "$LOCK"))"; exit 0; fi
 echo $$ > "$LOCK"
@@ -389,8 +437,12 @@ rm -f "$STOP"
 resume_build() {
   if [ "$REQUIRE_GIT" -eq 1 ] && [ ! -d .git ]; then say "cannot run: run git init first so each task is checkpointed"; return 1; fi
   local -a cmd=(); while IFS= read -r -d '' a; do cmd+=("$a"); done < <(claude_args)
-  timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" >> "$LOG" 2>&1
-  local code=$?
+  local code
+  if [ $VERBOSE -eq 1 ]; then   # verbose: show the model's output live as well as logging it
+    timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" 2>&1 | tee -a "$LOG"; code=${PIPESTATUS[0]}
+  else
+    timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" >> "$LOG" 2>&1; code=$?
+  fi
   if [ $code -ne 0 ]; then
     local n=$(( $(cat "$FAILS" 2>/dev/null || echo 0) + 1 )) idx wait
     echo $n > "$FAILS"; idx=$(( n-1 )); [ $idx -ge ${#BACKOFF_STEPS[@]} ] && idx=$(( ${#BACKOFF_STEPS[@]} - 1 ))
@@ -402,7 +454,7 @@ resume_build() {
   rm -f "$FAILS" "$BACKOFF"; say "run finished"; return 0
 }
 
-say "started ($PROJECT_NAME in $(pwd)). Checking every $(( INTERVAL/60 )) min. See progress: tail -f $(proj_path "$LOG")   or   $(self_cmd) -v"
+say "started ($PROJECT_NAME in $(pwd)). Checking every $(( INTERVAL/60 )) min. See progress: tail -f $(proj_path "$LOG")   or   $(self_cmd) -s"
 say "stop with Ctrl+C, $(self_cmd) -k, or: touch $(proj_path "$STOP")"
 NO_PROGRESS=0
 while true; do

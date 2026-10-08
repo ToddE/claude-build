@@ -25,27 +25,31 @@ Copy this folder into any project, edit `claude-build.conf` (set `PROJECT_DIR`),
 Requirements: bash 4.4 or newer, `git` (the project must be a repository), and the `claude` command logged in.
 
 ```
-./scripts/claude-build.sh                 show the full help. Nothing starts.
-./scripts/claude-build.sh -t 5            any flags without -r or -o: a PREVIEW of settings and the prompt. Nothing starts.
-./scripts/claude-build.sh -v              print the last state and the end of the log. Nothing starts.
-./scripts/claude-build.sh -r              start the loop in this terminal. Progress is printed and logged.
-./scripts/claude-build.sh -b              start the loop in the background and get your terminal back
-./scripts/claude-build.sh -k              stop the background build
+claude-build                              show the full help. Nothing starts.
+claude-build -c blog.conf                 preview using blog.conf. Nothing starts.
+claude-build -c blog.conf -s              print the last state and the end of the log. Nothing starts.
+claude-build -c blog.conf -r              really run, in this terminal. Quiet: a line per step.
+claude-build -v -c blog.conf -r           run verbosely: print the state first and show the model's output live.
+claude-build -c blog.conf -b              really run, in the background, and get your terminal back.
+claude-build -c blog.conf -k              stop the background build.
 ```
+
+These examples assume the script is on your `PATH` as `claude-build` (see "Installing on your PATH"). If a `claude-build.conf` sits beside the script, or in the folder you run it from, `-c blog.conf` can be left out.
 
 The script has these modes. Only `-r`, `-b`, and `-o` start work:
 
 | You run | What happens |
 | --- | --- |
 | no arguments | Prints the full help and exits |
-| flags, but not `-r`, `-o`, or `-v` | **Preview.** Shows the config in use, the project, the state counts, the settings, and the exact prompt, then exits. Starts nothing |
-| `-v` | **View.** Prints the last state, the recent tasks, and the end of the log, then exits. Works while a build runs and after it has ended. Starts nothing |
-| `-r` | **Run in this terminal.** Starts the loop and keeps going until the build ends or you press Ctrl+C |
-| `-b` | **Run in the background.** The script starts itself again, detached from the terminal, and returns to you. No `&` or `nohup` needed |
+| flags, but not `-r`, `-b`, `-o`, or `-s` | **Preview.** Shows the config in use, the project, the state counts, the settings, and the exact prompt, then exits. Starts nothing. Add `-v` to print the state report first |
+| `-s` | **Status.** Prints the last state, the recent tasks, and the end of the log, then exits. Works while a build runs and after it has ended. Starts nothing |
+| `-r` | **Really run, in this terminal.** Quiet: a line for each step. Keeps going until the build ends or you press Ctrl+C |
+| `-b` | **Really run, in the background.** The script starts itself again, detached from the terminal, and returns to you. No `&` or `nohup` needed |
 | `-o` | **Run one cycle** and exit. For cron or a timer |
 | `-k` | **Stop** the background build |
+| `-v` | **Verbose**, added to a preview or a run flag. Prints the state report first, and with `-r` or `-o` shows the model's output live as well as logging it |
 
-Because preview is the default, a stray command cannot spend tokens. Progress is printed to the terminal and appended to the log file (`.build/build.log`, and `.build/supervisor.log` for `-b`). Follow it with `tail -f`, or look at the state at any time with `-v`.
+Because preview is the default, a stray command cannot spend tokens. Progress is printed to the terminal and appended to the log file (`.build/build.log`, and `.build/supervisor.log` for `-b`). Follow it with `tail -f`, or look at the state at any time with `-s`.
 
 ### Where it runs from
 
@@ -106,14 +110,14 @@ Every flag has a short and a long form. A flag overrides the config file, which 
 ### What to do
 
 #### `-r`, `--run`
-Start the supervisor loop. It keeps cycling until the build is done, blocked, at a gate, or you stop it. Without `-r`, `-b`, or `-o` the script only previews.
+Really run the supervisor loop in this terminal. It stays quiet: a line when it starts, a line for each run and wait, and a line when the build ends. It keeps cycling until the build is done, blocked, at a gate, or you stop it. Without `-r`, `-b`, or `-o` the script only previews. Add `-v` for a verbose run: the state report is printed first (whether a loop is running, the status, the next task and the model and effort it will use, the done count, the recent tasks, and the log tail), and the model's output is shown live as well as logged.
 ```
 ./claude-build.sh -r
 ./claude-build.sh -r -m opus -t 2        run on Opus, two tasks per run
 ```
 
 #### `-b`, `--background`
-Run the loop in the background. The script checks the project and git first, so mistakes show in your terminal, then starts itself again in a detached session and returns after about two seconds. It prints the process id, the log to follow, and the commands to look at the state (`-v`) and to stop it (`-k`). Closing the terminal does not stop it. If a build is already running, it says so and does nothing else. All other flags and the config work as with `-r`.
+Really run the loop in the background. The script checks the project and git first, then starts itself again in a detached session and returns after about two seconds. It prints the process id, the log to follow, and the commands to look at the state (`-s`) and to stop it (`-k`). Closing the terminal does not stop it. If a build is already running, it says so and does nothing else. All other flags and the config work as with `-r`. `-b -v` prints the state report before it starts.
 ```
 ./claude-build.sh -b
 ./claude-build.sh -b -m opus -t 2 -c ~/builds/blog.conf
@@ -127,21 +131,30 @@ Stop the background build for this project. It ends any model run in progress (t
 ```
 
 #### `-o`, `--once`
-Run exactly one cycle and exit. It does one model run if the state is `ready` and no backoff is active. Use it from cron or a timer. Exit codes are as in section 10.
+Run exactly one cycle and exit. It does one model run if the state is `ready` and no backoff is active. Use it from cron or a timer. It is quiet, so cron mail stays small. Add `-v` to print the state report first and show the model's output. Exit codes are as in section 10.
 ```
 ./claude-build.sh -o
 */30 * * * * /path/to/project/scripts/claude-build.sh -o        (crontab line)
 ```
 
-#### `-v`, `--view`
-Print the last state and the end of the log, then exit. It shows whether a build loop is running, the status and any blocked reason, any backoff wait, the next task, how many tasks are done, the last five finished tasks, and the last 15 lines of the log with values from `REDACT_FILES` replaced by `[hidden]`. No build is started, no lock is taken, and the model is never called. It works while a build runs in another terminal, in the background, or from cron, and it works after the build has ended.
+#### `-s`, `--status`
+Print the last state and the end of the log, then exit. It shows whether a build loop is running, the status and any blocked reason, any backoff wait, the next task with the model and effort it will use, how many tasks are done, the last five finished tasks, and the last 15 lines of the log with values from `REDACT_FILES` replaced by `[hidden]`. No build is started, no lock is taken, and the model is never called. It works while a build runs in another terminal, in the background, or from cron, and after the build has ended.
+
+It looks in the log directory of the project it resolves to: `PROJECT_DIR/LOG_DIR` (default `.build`), for the project named by `-d`, or by `PROJECT_DIR` in the config that `-c` names, or in the folder-local or script-local config. It does not scan for other builds. Give it the same `-c` (and `-l`, if you set one) you started the build with.
 ```
-./claude-build.sh -v
-./claude-build.sh -v -c ~/builds/blog.conf
+claude-build -c ~/builds/blog.conf -s
+```
+`-s` stands alone. Combining it with `-r`, `-b`, or `-o` is an error.
+
+#### `-v`, `--verbose`
+A modifier, not a mode. With a preview, `-v` prints the state report before the settings and prompt. With `-r` or `-o`, it prints the state report first and shows the model's output live in the terminal as well as logging it. With `-b` it prints the state report before backgrounding. The background copy itself does not echo the model's output. Follow it with `tail -f`.
+```
+claude-build -v -c blog.conf                  verbose preview
+claude-build -v -c blog.conf -r               verbose run
 ```
 
 #### Preview (no flag)
-There is no flag to ask for a preview. When you pass flags but not `-r`, `-o`, or `-v`, the script prints the config in use, the project, state counts, settings, context paths, allowed commands, and the exact prompt, then exits. It needs no git repository. Add the flags you want to test.
+There is no flag to ask for a preview. When you pass flags but not `-r`, `-b`, `-o`, or `-s`, the script prints the config in use, the project, state counts, settings, context paths, allowed commands, and the exact prompt, then exits. It needs no git repository. Add the flags you want to test.
 ```
 ./claude-build.sh -m haiku -t 3 -i docs/spec.md      preview what -r would do with these
 ./claude-build.sh -c ~/builds/blog.conf               preview another project
@@ -188,6 +201,8 @@ Placeholders, filled in before the run starts:
 | `{state_file}` | The state file name |
 | `{tasks_per_run}` | The value of `-t` |
 | `{context}` | A sentence listing the `-i` paths, or nothing if there are none |
+| `{model}`, `{effort}` | The model and effort chosen for this run |
+| `{model_rule}` | Tells the run to do only tasks for its model and to stop before one that needs a different model. Added automatically at the end of your prompt if you do not use it |
 
 ```
 ./claude-build.sh -r -P 'Read {state_file}. {context} Do the NEXT task only, then commit.' -t 1
@@ -208,9 +223,16 @@ A file or directory the run should start reading from. Repeat the flag for more.
 ### How each run is done
 
 #### `-m`, `--model NAME`
-The model for each run, passed to `claude --model`. Default `sonnet`. Use a stronger model for harder work and a smaller one for mechanical work, but choose once, not by retrying.
+Force one model for every run, passed to `claude --model`. This turns `MODEL_FROM_STATE` off for the run, so the Model column is ignored. Without `-m`, each run uses the model named for the next task (see "Model and effort per task" below), and the config's `MODEL` is only the fallback. Use a stronger model for harder work and a smaller one for mechanical work, but choose once, not by retrying.
 ```
 ./claude-build.sh -r -m opus
+```
+
+#### `-e`, `--effort LEVEL`
+Force one effort level for every run, passed to `claude --effort`: how much the model reasons before it answers. Levels are `low`, `medium`, `high`, `xhigh`, and `max`. This turns `EFFORT_FROM_STATE` off for the run. Without `-e`, effort comes from the task's Effort cell, else from the model's default in `EFFORT_DEFAULTS`.
+```
+./claude-build.sh -r -e low
+./claude-build.sh -r -m opus -e xhigh
 ```
 
 #### `-M`, `--permission-mode MODE`
@@ -239,13 +261,48 @@ How long to wait when there is nothing to do, or after a failed run (the backoff
 #### `-a`, `--after-run SECONDS`
 How long to wait after a good run before the next one starts. Default 30.
 
+### Combining flags
+
+Flags can come in any order, and single-letter flags can be bundled behind one dash: `-rv` is `-r -v`, and `-rvc blog.conf` is `-r -v -c blog.conf`. A letter that takes a value (`-c`, `-d`, `-S`, `-P`, `-f`, `-i`, `-m`, `-M`, `-t`, `-T`, `-w`, `-a`, `-l`, `-e`) must be the last letter in its bundle, and its value is the next argument. `-cv blog.conf` is an error, because `-c` would need to be last. Long flags (`--run`) are never bundled, and a value that starts with a dash, such as a prompt, is taken as written.
+
+Examples of bundles:
+```
+claude-build -rv -c blog.conf         verbose run
+claude-build -vrc blog.conf           the same, with the config last
+claude-build -bvc blog.conf           background, verbose start, config
+claude-build -sc blog.conf            status for blog.conf
+claude-build -kc blog.conf            stop the build for blog.conf
+```
+
+A few combinations have a defined meaning, and the script rejects the ones that do not make sense instead of picking one quietly.
+
+| Combination | Result |
+| --- | --- |
+| `-c FILE` plus any settings flags (`-m`, `-t`, `-i`, ...), no run flag | Preview with those settings. Nothing starts |
+| `-v` plus no run flag | Verbose preview: the state report, then the settings and prompt |
+| `-s` | Print the state and the log tail, then exit |
+| `-r` | Really run in this terminal, quietly |
+| `-v -r` | Run verbosely: the state report first, the model's output live |
+| `-b` | Really run in the background, quietly. `-b -v` prints the state report first |
+| `-o` | Run one cycle, quietly. `-o -v` prints the report and the model's output |
+| `-r`, `-b`, and `-o` together (any two) | Error. Choose one |
+| `-s` plus `-r`, `-b`, or `-o` | Error. `-s` stands alone |
+| `-k` plus any of `-r`, `-b`, `-o`, `-s` | Error. `-k` stands alone |
+| `-m` or `-e` plus any run flag | The run uses that model or effort for every task |
+
+```
+claude-build -c blog.conf -b -m opus -t 2             background, forced to opus, two tasks per run
+claude-build -d ~/Workspace/blog -S docs/PROGRESS.md -i docs/ -r      no config file: say everything on the command line
+```
+
 ### Flag summary
 
 | Short | Long | Default |
 | --- | --- | --- |
 | -r | --run | off |
 | -o | --once | off |
-| -v | --view | off |
+| -s | --status | off |
+| -v | --verbose | off |
 | -b | --background | off |
 | -k | --stop | off |
 | -h | --help | |
@@ -256,12 +313,26 @@ How long to wait after a good run before the next one starts. Default 30.
 | -P | --prompt TEXT | built-in prompt |
 | -f | --prompt-file FILE | none |
 | -i | --context PATH | none |
-| -m | --model NAME | sonnet |
+| -m | --model NAME | per task from the state file, fallback sonnet |
+| -e | --effort LEVEL | per task from the state file, else by model |
 | -M | --permission-mode MODE | acceptEdits |
 | -t | --tasks-per-run N | 5 |
 | -T | --timeout DURATION | 3h |
 | -w | --interval SECONDS | 1200 |
 | -a | --after-run SECONDS | 30 |
+
+### Model and effort per task
+
+With `MODEL_FROM_STATE=1` (the default), **the script chooses the model, and no model orchestrates.** Before each run it reads the `Model` cell of the task named in `NEXT` and starts `claude` with that model.
+
+- **Names:** `Sonnet`, `Opus`, and `Haiku` are read as `sonnet`, `opus`, and `haiku`. Extra words are ignored, so `Sonnet (copywriter)` is `sonnet`. Anything else is passed to `claude --model` as written.
+- **Batching:** a run does the next task and any later tasks that name the same model, up to `TASKS_PER_RUN`. It stops before a task for a different model, and the script starts a new run on that model. A task list that groups same-model tasks therefore needs few start-ups.
+- **Effort:** the same way. The task's `Effort` cell is used if there is one. Otherwise the model's level in `EFFORT_DEFAULTS` is used (`opus=high`, `sonnet=medium`, `haiku=low`).
+- **Fallbacks:** a task with no `Model` cell uses `MODEL`. If no level is found, `EFFORT` is used, and if that is empty, the Claude Code default.
+- **Forcing:** `-m` forces one model for every run and uses that model's default effort. `-e` forces one effort. A forced run ignores the Model and Effort cells.
+- **Visible:** the terminal and the log show it, for example `running: next task 0.8 on opus, effort xhigh (7/66 done)`, and a preview shows `next run: task 0.8 on opus, effort xhigh`.
+
+Choosing the model for each task once, instead of starting low and redoing the work on a higher model, avoids repeat runs.
 
 ## 4. The state file
 
@@ -285,7 +356,7 @@ BLOCKED_REASON:
 | `STATUS:` | `ready` runs work. `blocked` waits for a person and needs a reason. `gate` waits for a person to review. `done` ends the loop. The script reads the first line that starts with `STATUS:` |
 | `NEXT:` | The id of the next task. The run sets it after each task |
 | `BLOCKED_REASON:` | Filled in when `STATUS` is `blocked` |
-| Task table | A Markdown table whose header has `Id` and `Status` columns. `Status` is `todo`, `doing`, or `done`. `Task`, `Model`, `Milestone`, and `Commit` are shown by `-v` when present. Other columns are ignored |
+| Task table | A Markdown table whose header has `Id` and `Status` columns. `Status` is `todo`, `doing`, or `done`. Optional `Model` and `Effort` columns say which model and effort level each task should use (below). `Task`, `Milestone`, and `Commit` are shown by `-s` when present. Other columns are ignored |
 
 Each run updates the table and `NEXT`, and commits, after every task. To change what happens next, edit the file: set a row back to `todo`, add rows, or change `NEXT`.
 
@@ -295,13 +366,17 @@ Each run updates the table and `NEXT`, and commits, after every task. To change 
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `PROJECT_NAME` | `build` | Shown in the log and in the `-v` report |
+| `PROJECT_NAME` | `build` | Shown in the log and in the `-s` report |
 | `PROJECT_DIR` | none (see "Where it runs from") | Same as `-d`. The project folder on this computer, as an absolute path. The state file, context paths, log directory, and redact files are all relative to it |
 | `STATE_FILE` | `BUILD_STATE.md` | Same as `-S` |
 | `PROMPT` | built-in | Same as `-P`. Placeholders as above |
 | `PROMPT_FILE` | none | Same as `-f`. Wins over `PROMPT` |
 | `CONTEXT_FILES` | `()` | Array, same as `-i` |
-| `MODEL` | `sonnet` | Same as `-m` |
+| `MODEL` | `sonnet` | Same as `-m`. The fallback model, used when `MODEL_FROM_STATE` is `0` or a task has no Model cell |
+| `MODEL_FROM_STATE` | `1` | `1` starts each run on the model named in the next task's Model column. `0` uses `MODEL` for every run |
+| `EFFORT` | empty | Same as `-e`. The fallback effort level. Empty means the Claude Code default |
+| `EFFORT_FROM_STATE` | `1` | `1` uses the next task's Effort cell, else `EFFORT_DEFAULTS`. `0` uses `EFFORT` for every run |
+| `EFFORT_DEFAULTS` | `("opus=high" "sonnet=medium" "haiku=low")` | Array of `model=level`. The effort for each model when a task has no Effort cell |
 | `PERMISSION_MODE` | `acceptEdits` | Same as `-M` |
 | `ALLOWED_TOOLS` | read, edit, write, search, and a few safe git and shell commands | Array. The only tools and commands an unattended run may use. See below |
 | `EXTRA_CLAUDE_ARGS` | `()` | Array of extra arguments passed to `claude` |
@@ -313,7 +388,7 @@ Each run updates the table and `NEXT`, and commits, after every task. To change 
 | `BACKOFF_STEPS` | `(3600 7200 14400 21600)` | Seconds to wait after the 1st, 2nd, 3rd, and later failures |
 | `LOG_DIR` | `.build` | Same as `-l` |
 | `REQUIRE_GIT` | `1` | Set `0` to allow a project that is not a git repository. Not recommended |
-| `REDACT_FILES` | `(".env.local")` | Files whose values are hidden if they appear in the log lines that `-v` prints |
+| `REDACT_FILES` | `(".env.local")` | Files whose values are hidden if they appear in the log lines that `-s` prints |
 
 ### Example for a documentation project
 
@@ -344,7 +419,7 @@ There is no server to run. Progress goes to the terminal and to a log file, and 
 | See the state file itself | Open `BUILD_STATE.md` (or your `STATE_FILE`). Each task row and `NEXT` are updated after every task |
 | See the work | `git log --oneline`. Every task is a commit |
 
-`-v` prints something like this:
+`-s` prints something like this:
 
 ```
 inform9 build
@@ -496,7 +571,9 @@ A stand-in that exits 0 and does nothing lets you see the no-progress guard stop
 
 | What you see | Cause | Fix |
 | --- | --- | --- |
-| The help text prints and nothing starts | You gave no arguments | Add a flag to preview, `-v` to view, or `-r` or `-o` to run |
+| `Choose one of -r, -b, or -o` and exit 64 | Two run flags were given together | Pick one |
+| `-k cannot be combined` and exit 64 | `-k` was given with a run or view flag | Run `-k` on its own |
+| The help text prints and nothing starts | You gave no arguments | Add a flag to preview, `-s` for the status, or `-r`, `-b`, or `-o` to run |
 | `PREVIEW ONLY` and nothing runs | Flags were given without `-r` or `-o` | Add `-r` (loop) or `-o` (one cycle) |
 | `refusing to use ... conf` and exit 64 | The config is owned by someone else or anyone can write to it | `chmod o-w` the file, or use your own |
 | `cannot run: run git init first` and exit 1 | Not a git repository | `git init` and make a first commit |
@@ -517,4 +594,4 @@ A stand-in that exits 0 and does nothing lets you see the no-progress guard stop
 - One copy runs at a time.
 - The config file is run as shell. Only use your own.
 - Every task is a commit, so any task can be reverted with git.
-- Keep secrets out of the state file and the log. `-v` hides values from `REDACT_FILES` in the log tail it prints, but the log file itself is not scrubbed, so keep it out of git and out of screenshots.
+- Keep secrets out of the state file and the log. `-s` hides values from `REDACT_FILES` in the log tail it prints, but the log file itself is not scrubbed, so keep it out of git and out of screenshots.

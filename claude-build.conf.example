@@ -6,6 +6,9 @@
 #   2. Edit the copy: at the least set PROJECT_DIR (the folder the build works in).
 #   3. Check it:           ./claude-build.sh -c claude-build.conf        (a preview, starts nothing)
 #   4. Run it:             ./claude-build.sh -c claude-build.conf -r     (or -b for the background)
+#      Run verbosely (state first, model output live): ./claude-build.sh -c claude-build.conf -v -r
+#      Look without running: ./claude-build.sh -c claude-build.conf -s
+#      Stop a background build:               ./claude-build.sh -c claude-build.conf -k
 #
 # This file is read as shell, so keep it to KEY=value lines and ( ) arrays, and quote values that
 # contain spaces. It is executed, so only use a config you wrote or trust. The script refuses a
@@ -34,7 +37,7 @@
 # -----------------------------------------------------------------------------
 
 # PROJECT_NAME
-#   A label shown in the log and in the -v report. Has no other effect.
+#   A label shown in the log and in the -s report. Has no other effect.
 #   Values: any text            Default: "build"            Flag: none
 PROJECT_NAME="myproject"
 
@@ -93,7 +96,7 @@ LOG_DIR=".build"
 #   Values: text in single quotes   Default: read the state file, continue at NEXT, do up to N
 #   tasks, update the state file and commit after each, set STATUS to blocked at a stop condition,
 #   do not deploy or push.      Flag: -P, --prompt TEXT   (a flag prompt replaces this one)
-PROMPT='Read {state_file}. {context} Continue the build at the NEXT task. Do up to {tasks_per_run} tasks, or stop earlier at a gate or a stop condition. After each task, update {state_file} and commit. If a stop condition applies, set STATUS to blocked with the reason and stop. Do not deploy and do not push.'
+PROMPT='Read {state_file}. {context} Continue the build at the NEXT task. Do up to {tasks_per_run} tasks, or stop earlier at a gate or a stop condition. {model_rule} After each task, update {state_file} and commit. If a stop condition applies, set STATUS to blocked with the reason and stop. Do not deploy and do not push.'
 
 # PROMPT_FILE
 #   A path to a text file holding the prompt, for long prompts. The same placeholders work inside
@@ -118,10 +121,42 @@ CONTEXT_FILES=("README.md")
 # -----------------------------------------------------------------------------
 
 # MODEL
-#   The model for each run, passed to "claude --model". Examples: sonnet, opus, haiku, or a full
-#   model id. Choose the model that suits the work once. Do not start low and redo on a higher one.
+#   The fallback model, passed to "claude --model". Used when MODEL_FROM_STATE is 0, or for a task
+#   whose Model cell in the state file is empty. Examples: sonnet, opus, haiku, or a full model id.
+#   The -m flag forces this model for every run and turns MODEL_FROM_STATE off.
 #   Values: a model name        Default: "sonnet"           Flag: -m, --model NAME
 MODEL="sonnet"
+
+# MODEL_FROM_STATE
+#   1 = each run uses the model named in the Model column of the NEXT task in the state file. The
+#       script chooses, so no model has to orchestrate. Consecutive tasks with the same model share
+#       one run. When the next task names a different model, the run stops before it and the script
+#       starts a new run on that model. "Sonnet (copywriter)" is read as sonnet.
+#   0 = every run uses MODEL.
+#   Choosing the right model once per task avoids starting low and redoing the work on a higher one.
+#   Values: 1 or 0              Default: 1                  Flag: -m turns it off for that run
+MODEL_FROM_STATE=1
+
+# EFFORT
+#   The fallback effort level, passed to "claude --effort": how much the model reasons before it
+#   answers. Used when EFFORT_FROM_STATE is 0, or when neither the task nor EFFORT_DEFAULTS gives
+#   one. Empty means the Claude Code default. Levels: low, medium, high, xhigh, max.
+#   The -e flag forces this level for every run and turns EFFORT_FROM_STATE off.
+#   Values: a level or ""       Default: ""                 Flag: -e, --effort LEVEL
+EFFORT=""
+
+# EFFORT_FROM_STATE
+#   1 = each run uses the Effort column of the NEXT task if it has one and the model also came from
+#       the state file, else the level for the model in EFFORT_DEFAULTS, else EFFORT.
+#   0 = every run uses EFFORT.
+#   Values: 1 or 0              Default: 1                  Flag: -e turns it off for that run
+EFFORT_FROM_STATE=1
+
+# EFFORT_DEFAULTS   (config only)
+#   The effort level for each model when a task has no Effort cell. An array of "model=level".
+#   Low for scripted work, medium for spec-built work, high for security and design.
+#   Values: an array            Default: ("opus=high" "sonnet=medium" "haiku=low")
+EFFORT_DEFAULTS=("opus=high" "sonnet=medium" "haiku=low")
 
 # PERMISSION_MODE
 #   The Claude Code permission mode for the run. "acceptEdits" accepts file edits without asking.
@@ -209,11 +244,11 @@ BACKOFF_STEPS=(3600 7200 14400 21600)
 # -----------------------------------------------------------------------------
 # There is no server and nothing to configure. Progress is printed to the terminal and appended to
 # LOG_DIR/build.log (LOG_DIR/supervisor.log when started with -b). Follow it with tail -f, or
-# print the last state, recent tasks, and log tail at any time with ./claude-build.sh -v.
+# print the last state, recent tasks, and log tail at any time with ./claude-build.sh -s.
 
 # REDACT_FILES   (config only)
 #   Files whose values (lines like KEY=value) are replaced with [hidden] if they appear in the log
-#   lines that -v prints. Relative to PROJECT_DIR. Only values of 8 or more characters are hidden.
+#   lines that -s prints. Relative to PROJECT_DIR. Only values of 8 or more characters are hidden.
 #   The log file itself is not scrubbed, so keep it out of git and out of screenshots.
 #   Values: an array of paths   Default: (".env.local")
 REDACT_FILES=(".env.local")
