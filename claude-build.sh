@@ -2,8 +2,9 @@
 # claude-build.sh: keep a Claude Code build going until it is done, blocked, or at a gate.
 # Run it with no arguments for the full help. With flags but no -r, -b, or -o it only previews.
 # Pure bash. Progress goes to the terminal and to a log file. Settings: defaults below,
-# then claude-build.conf, then command-line flags. See README_claude-build.md in this folder.
+# then claude-build.conf, then command-line flags. See README.md in this folder.
 set -u
+VERSION="0.1.0"
 
 # Where this script really lives (symlinks followed) and where the command was typed.
 # Nothing here assumes the command is run from the project folder.
@@ -137,6 +138,7 @@ FLAGS  (a flag overrides the config file, which overrides the built-in default)
   -a, --after-run SECONDS    wait after a good run             [$AFTER_RUN]
   -l, --log-dir DIR          logs, lock, and stop file         [$LOG_DIR]
   -h, --help                 show this text
+      --version              print the version and exit
 
 PROMPT PLACEHOLDERS
   {state_file}   the state file name
@@ -255,6 +257,7 @@ while [ $# -gt 0 ]; do
     -b|--background) BACKGROUND=1; shift ;;
     -k|--stop) STOPIT=1; shift ;;
     -h|--help) usage; exit 0 ;;
+    --version) echo "$NAME $VERSION"; exit 0 ;;
     *) echo "unknown option: $1 (try -h)"; exit 64 ;;
   esac
 done
@@ -271,7 +274,7 @@ if [ -z "$PROJECT_DIR" ]; then
 fi
 [ -d "$PROJECT_DIR" ] || { echo "project folder not found: $PROJECT_DIR"; exit 64; }
 cd "$PROJECT_DIR" || exit 64
-[ -f "$STATE_FILE" ] || { echo "state file not found: $STATE_FILE (looked in $(pwd)). It needs STATUS, NEXT, and a task table. See README_claude-build.md, section 4."; exit 64; }
+[ -f "$STATE_FILE" ] || { echo "state file not found: $STATE_FILE (looked in $(pwd)). It needs STATUS, NEXT, and a task table. See README.md, section 4."; exit 64; }
 LOG="$LOG_DIR/build.log"; LOCK="$LOG_DIR/build.lock"; BACKOFF="$LOG_DIR/backoff_until"; FAILS="$LOG_DIR/failures"; STOP="$LOG_DIR/stop"
 
 proj_path() { case "$1" in /*) printf %s "$1" ;; *) printf %s "$PWD/$1" ;; esac; }   # absolute path for a project-relative one

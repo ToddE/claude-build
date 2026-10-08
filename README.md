@@ -2,7 +2,30 @@
 
 `claude-build.sh` keeps a Claude Code build going until it is done, blocked, or at a gate. It reads a state file, and while the status is `ready` it starts one bounded `claude -p` session that does the next few tasks, updates the state file, and commits. Then it sleeps and checks again. Sleeping and checking use no model, so an idle or finished build costs almost nothing.
 
-Copy this folder into any project, edit `claude-build.conf` (set `PROJECT_DIR`), and add a state file (section 4). Or keep one copy anywhere and point it at a project with `-c` and `-d`.
+Install it with the script in section 1, edit `claude-build.conf` (set `PROJECT_DIR`), and add a state file (section 4). One installed copy can build any number of projects: point it at a project with `-c` and `-d`.
+
+## Why claude-build
+
+Long builds with Claude Code usually fail in the same few ways: the context fills up, a usage limit stops the session, or a task goes wrong and nobody notices until morning. claude-build handles each of these with plain bash and a Markdown state file.
+
+- **A small fresh context for every run.** Each run is one bounded `claude -p` session that does the next few tasks. A crash or usage limit costs at most one task, and the next run starts clean from the state file and git.
+- **The script chooses the model, and no model orchestrates.** Each task row names a model and an effort level. The script starts each run with those settings, so routine tasks use cheaper models and hard ones use Opus.
+- **Failures are handled for you.** A failed run waits 1, 2, 4, then 6 hours. A task that fails twice is handed to Opus at high effort with a written diagnosis. Two clean runs that finish nothing set the build to `blocked`, with a reason.
+- **Waiting costs nothing.** Sleeping and checking use no model, so an idle or finished build costs almost nothing.
+- **Designed to be left alone.** Unattended runs may use only the commands on an allowed list, with no push, deploy, or delete by default. One copy runs at a time, and every task is a commit you can revert.
+- **Hard to start by accident.** With no flags you get the help. With flags but no run flag you get a preview of the config, the model, and the exact prompt. Only `-r`, `-b`, and `-o` spend tokens.
+- **Stops where a person should decide.** The state file has `ready`, `blocked`, `gate`, and `done`. A `gate` pauses the build for a human decision and shows why.
+- **Easy to inspect.** `-s` shows the last state, recent tasks, and the log tail while the build runs and after it ends.
+- **Small and readable.** It is one bash script with no dependencies beyond standard tools. You can read all of it before you run it.
+
+### Related projects
+
+The idea of calling `claude -p` in a loop with progress kept in files and git is well known as the Ralph Wiggum loop, and several projects build on it. claude-build follows the same pattern and adds the supervision around it: per-task model and effort, backoff, escalation, gates, an allowed-tools list, and a preview mode. Other projects to look at:
+
+- [Ralph Wiggum loop](https://kartit.net/blog/ralph-wiggum-technique.html): the original shell loop, and Anthropic's plugin that runs a similar loop inside one session with a stop hook.
+- [loopgen](https://github.com/pro-vi/loopy): generates the prompt, state, and queue files for a long-running loop.
+- [claude-automation](https://pypi.org/project/claude-automation/): an overnight pipeline with plan, code, review, and test stages, and one git worktree per task.
+- [Orchestra](https://pkg.go.dev/github.com/MochaCosine1206/orchestra): a Go tool that runs `claude -p` rounds with circuit breakers.
 
 ## Contents
 
@@ -19,10 +42,71 @@ Copy this folder into any project, edit `claude-build.conf` (set `PROJECT_DIR`),
 11. [Testing without spending tokens](#11-testing-without-spending-tokens)
 12. [Troubleshooting](#12-troubleshooting)
 13. [Safety](#13-safety)
+14. [License](#14-license)
 
 ## 1. Quick start
 
-Requirements: bash 4.4 or newer, `git` (the project must be a repository), and the `claude` command logged in.
+### Requirements
+
+| Needed | Why |
+| --- | --- |
+| bash 4.4 or newer | The script is pure bash. Check with `bash --version`. macOS ships bash 3.2, so install a newer one with Homebrew |
+| `claude` (Claude Code), logged in | Each run is a `claude -p` session |
+| `git` | The project must be a git repository. Each task is committed |
+| `setsid`, `timeout`, `readlink`, `stat`, `awk`, `sed` | Standard on Linux (util-linux and coreutils). On macOS, install coreutils and util-linux with Homebrew |
+| `curl` or `wget` | Only for the install script |
+
+### Install
+
+Run one of these. Each downloads `install.sh` from this repository and runs it:
+
+```
+curl -fsSL https://raw.githubusercontent.com/ToddE/claude-build/main/install.sh | bash
+wget -qO- https://raw.githubusercontent.com/ToddE/claude-build/main/install.sh | bash
+```
+
+To read the script before running it, download it first:
+
+```
+curl -fsSLO https://raw.githubusercontent.com/ToddE/claude-build/main/install.sh
+less install.sh
+bash install.sh
+```
+
+The installer:
+
+1. Checks for bash 4.4 or newer and warns about any missing tool from the table above.
+2. Picks the latest GitHub release, or `main` if there is no release yet.
+3. Downloads the script, the example config, and this manual to `~/.local/share/claude-build/<version>/`. It refuses a file that is not a bash script or has a syntax error.
+4. Links `~/.local/bin/claude-build` to that copy.
+5. Tells you if `~/.local/bin` is not on your `PATH`.
+
+Then check it:
+
+```
+claude-build --version
+claude-build               full help
+```
+
+Options are environment variables placed before `bash`:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CLAUDE_BUILD_VERSION` | latest release, else `main` | A release tag such as `v0.1.0`, or `main` |
+| `BIN_DIR` | `~/.local/bin` | Where the `claude-build` link goes |
+| `SHARE_DIR` | `~/.local/share/claude-build` | Where the files go |
+
+For example, `curl -fsSL .../install.sh | CLAUDE_BUILD_VERSION=v0.1.0 bash` installs that version.
+
+**Upgrading.** Run the same command again. It installs the new version beside the old ones and moves the link. The script does not check for updates or change itself while a build runs.
+
+**Your config.** Put a config you want to keep at `~/.local/share/claude-build/claude-build.conf`. The installer links it into each version folder, so it survives upgrades. The installer never overwrites a config. You can also keep configs inside your projects and pass `-c`.
+
+**Uninstall.** Remove the link and the folder: `rm ~/.local/bin/claude-build && rm -r ~/.local/share/claude-build`.
+
+**Without the installer.** Clone the repository and link the script yourself (see "Installing on your PATH" below).
+
+### Commands
 
 ```
 claude-build                              show the full help. Nothing starts.
@@ -71,10 +155,11 @@ cd /tmp && ~/Workspace/inform9/scripts/claude-build.sh -m opus        works from
 
 ### Installing on your PATH
 
-For one user, put a symlink in `~/.local/bin` (not `/usr/local/bin`, which would let every account on the machine start unattended builds with your login):
+The installer does this for you. To do it by hand, for one user, put a symlink in `~/.local/bin` (not `/usr/local/bin`, which would let every account on the machine start unattended builds with your login):
 
 ```
-ln -s ~/Workspace/inform9/scripts/claude-build.sh ~/.local/bin/claude-build
+git clone https://github.com/ToddE/claude-build ~/Workspace/claude-build
+ln -s ~/Workspace/claude-build/claude-build.sh ~/.local/bin/claude-build
 claude-build               full help, from any folder
 claude-build -m sonnet     preview
 ```
@@ -595,3 +680,7 @@ A stand-in that exits 0 and does nothing lets you see the no-progress guard stop
 - The config file is run as shell. Only use your own.
 - Every task is a commit, so any task can be reverted with git.
 - Keep secrets out of the state file and the log. `-s` hides values from `REDACT_FILES` in the log tail it prints, but the log file itself is not scrubbed, so keep it out of git and out of screenshots.
+
+## 14. License
+
+MIT. See [LICENSE](LICENSE).
