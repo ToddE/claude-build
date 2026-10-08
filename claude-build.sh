@@ -687,10 +687,28 @@ if [ $VERBOSE -eq 1 ]; then show_state; echo; fi
 mkdir -p "$LOG_DIR"
 if alive "$LOCK" claude-build; then echo "already running (pid $(cat "$LOCK"))"; exit 0; fi
 echo $$ > "$LOCK"
-cleanup() { rm -f "$LOCK" "$CURRENT"; log_msg "stopped"; }
+cleanup() { stop_spinner; rm -f "$LOCK" "$CURRENT"; log_msg "stopped"; }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 rm -f "$STOP"
+
+# A small animated line so a quiet foreground run does not look frozen: frame, task, model, time, and changed files.
+# Drawn on stderr only, only on a terminal. Stopped and erased when the run ends.
+spinner() {
+  local i=0 start n files="" el a b
+  local -a fr
+  case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in *UTF-8*|*utf8*|*UTF8*) fr=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏) ;; *) fr=('|' '/' '-' '\') ;; esac
+  start=$(date +%s); n=${#fr[@]}
+  printf '\033[?25l' >&2
+  while true; do
+    [ $(( i % 25 )) -eq 0 ] && [ -d .git ] && files=" $(git status --short 2>/dev/null | wc -l) files changed"
+    el=$(( $(date +%s) - start ))
+    printf '\r\033[2K%s task %s on %s, %dm%02ds,%s' "${fr[i % n]}" "$1" "$2" $(( el/60 )) $(( el%60 )) "${files:- 0 files changed}" >&2
+    i=$((i+1)); sleep 0.2
+  done
+}
+SPIN_PID=""
+stop_spinner() { [ -n "$SPIN_PID" ] && { kill "$SPIN_PID" 2>/dev/null; wait "$SPIN_PID" 2>/dev/null; SPIN_PID=""; printf '\r\033[2K\033[?25h' >&2; }; return 0; }
 
 # Turns Claude's stream-json lines into one readable line per step: what the model says, and each tool it uses.
 progress_lines() {
@@ -713,6 +731,8 @@ resume_build() {
   local -a cmd=(); while IFS= read -r -d '' a; do cmd+=("$a"); done < <(claude_args)
   local code
   echo "$(date +%s)|$(state NEXT)|$RUN_MODEL|${RUN_EFFORT:-default}" > "$CURRENT"
+  # Spinner: a foreground run on a terminal. Not with -v, which prints progress lines itself.
+  if [ -t 2 ] && [ $VERBOSE -eq 0 ]; then spinner "$(state NEXT)" "$RUN_MODEL" & SPIN_PID=$!; fi
   if [ "$STREAM" -eq 1 ] && command -v jq >/dev/null 2>&1; then
     # Progress while the run works. The raw stream is kept in LOG_DIR/last-run.jsonl.
     OUT_FORMAT=stream-json; cmd=(); while IFS= read -r -d '' a; do cmd+=("$a"); done < <(claude_args)
@@ -726,7 +746,7 @@ resume_build() {
   else
     timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" >> "$LOG" 2>&1; code=$?
   fi
-  rm -f "$CURRENT"
+  stop_spinner; rm -f "$CURRENT"
   if [ $code -ne 0 ]; then
     local n=$(( $(cat "$FAILS" 2>/dev/null || echo 0) + 1 )) idx wait
     echo $n > "$FAILS"; idx=$(( n-1 )); [ $idx -ge ${#BACKOFF_STEPS[@]} ] && idx=$(( ${#BACKOFF_STEPS[@]} - 1 ))

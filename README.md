@@ -300,7 +300,7 @@ Every flag has a short and a long form. A flag overrides the config file, which 
 ### What to do
 
 #### `-r`, `--run`
-Really run the supervisor loop in this terminal. It stays quiet: a line when it starts, a line for each run and wait, and a line when the build ends. It keeps cycling until the build is done, blocked, at a gate, or you stop it. Without `-r`, `-b`, or `-o` the script only previews. Add `-v` for a verbose run: the state report is printed first (whether a loop is running, the status, the next task and the model and effort it will use, the done count, the recent tasks, and the log tail), and the model's output is shown live as well as logged.
+Really run the supervisor loop in this terminal. It stays quiet: a line when it starts, a line for each run and wait, and a line when the build ends. It keeps cycling until the build is done, blocked, at a gate, or you stop it. Without `-r`, `-b`, or `-o` the script only previews. Add `-v` for a verbose run: the state report is printed first (whether a loop is running, the status, the next task and the model and effort it will use, the done count, the recent tasks, and the log tail), and the model's output is shown live as well as logged. While a run works, `-r` on a terminal shows an animated line with the task, the model, the elapsed time, and the number of changed files. It is erased when the run ends. With `-v` the progress lines take its place. Background and cron runs show no animation.
 ```
 ./claude-build.sh -r
 ./claude-build.sh -r -m opus -t 2        run on Opus, two tasks per run
@@ -335,6 +335,14 @@ It looks in the log directory of the project it resolves to: `PROJECT_DIR/LOG_DI
 claude-build -c ~/builds/blog.conf -s
 ```
 `-s` stands alone. Combining it with `-r`, `-b`, or `-o` is an error.
+
+#### `--watch`
+
+Status that refreshes. It shows the same report as `-s` and redraws it every 5 seconds until you press Ctrl+C (change the interval with `WATCH_EVERY=2 claude-build --watch`). Run it in a second terminal while a build works. Besides the status, next task, and task count, it shows how long the current run has been going and how many files have changed in the project since the last commit, so you can see a task taking shape before it is committed. It needs a terminal and cannot be combined with a run flag.
+
+```
+claude-build -c blog.conf --watch
+```
 
 #### `-v`, `--verbose`
 A modifier, not a mode. With a preview, `-v` prints the state report before the settings and prompt. With `-r` or `-o`, it prints the state report first and shows progress in the terminal as the run works, one line per step: what the model says and each tool it uses, with a time. The same lines are written to the log in every mode, so `tail -f .build/build.log` follows a run even without `-v`. This needs `jq`. Without `jq`, the model's output appears only when each run ends. The raw stream of the latest run is kept in `.build/last-run.jsonl`. Set `STREAM=0` in the config to turn live progress off. With `-b` the state report is printed before backgrounding, and the background copy does not echo to the terminal. Follow it with `tail -f`.
@@ -510,6 +518,7 @@ claude-build -d ~/Workspace/blog -S docs/PROGRESS.md -i docs/ -r      no config 
 | -r | --run | off |
 | -o | --once | off |
 | -s | --status | off |
+| | --watch | off. Status that redraws every 5 seconds |
 | -v | --verbose | off |
 | -b | --background | off |
 | -k | --stop | off |
