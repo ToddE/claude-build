@@ -20,8 +20,8 @@ How to read the table
           Model to Opus and Effort to high, and leaves the task todo.
 
 Why the Model column is useful
-  Rows 1.1 to 1.3 all name sonnet, so one run does all three. Row 1.4 names opus, so the
-  run stops after 1.3 and the script starts a new run on opus. Group same-model tasks
+  Rows 1.1 and 1.2 both name haiku, so one run does both. Row 1.3 names sonnet, so that
+  run stops after 1.2 and the script starts a new run on sonnet. Group same-model tasks
   together to keep the number of start-ups low.
 
 Gates

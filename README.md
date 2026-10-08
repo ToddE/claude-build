@@ -104,6 +104,12 @@ The script then checks that the file has `STATUS: ready` (or `blocked` with open
 
 **Read and edit the result before you run the build.** The table drives every run, and a vague task wastes a session.
 
+### Stuck?
+
+Run `claude-build --guide`. It opens an interactive Claude session that checks your setup (bash version, missing tools, config, project folder, state file, the end of the log), asks what you want to do, and gives you the exact commands, previews first. It cannot run claude-build for you, and it can only read files.
+
+It uses tokens, so before it starts it shows the model, an estimate of the starting size and of the README if it reads it, and asks `Continue? [y/N]`. Answering no uses nothing. The estimates are the character count divided by 4. The script cannot show a live counter inside the Claude session. Type `/cost` there for real usage and `/context` for the size. Choose the model with `-m` (default is `MODEL` from the config). It needs a terminal and the `claude` command, and it also works before you have a config or a state file. The "no project folder" and "state file not found" errors point to it.
+
 ### Requirements
 
 | Needed | Why |
@@ -156,7 +162,7 @@ Options are environment variables placed before `bash`:
 
 For example, `curl -fsSL .../install.sh | CLAUDE_BUILD_VERSION=v0.1.0 bash` installs that version.
 
-**Upgrading.** Run the same command again. It installs the new version beside the old ones and moves the link. The script does not check for updates or change itself while a build runs.
+**Upgrading.** Check with `claude-build --check-update`, which asks GitHub for the latest release, prints whether a newer one exists, and changes nothing. Install it with `claude-build --update`, which shows the installer URL and asks `Continue? [y/N]`. Or run the install command again. Either way the new version goes beside the old ones and the link moves. These two flags are the only times the script uses the network, and it never checks on its own, so a build that runs unattended never changes or contacts anything. `--update` works for copies made by the installer. For a git clone it tells you to run `git pull`.
 
 **Your config.** Put a config you want to keep at `~/.local/share/claude-build/claude-build.conf`. The installer links it into each version folder, so it survives upgrades. The installer never overwrites a config. You can also keep configs inside your projects and pass `-c`.
 
@@ -312,6 +318,14 @@ Draft the state file from your plan (section 1, "Before you start"). `--init` is
 
 Unclear points are written under `## Open questions` and the state is set to `blocked`. `-I` (`--interactive`, only with `--init`) starts an interactive session that asks you the questions instead. Answering them in the plan beforehand gives the best table.
 
+#### `--guide`
+
+Interactive help from Claude for a setup that is not working (section 1, "Stuck?"). Long form only. It shows an estimate of the tokens it will use and asks before it starts. It stands alone: it cannot be combined with `--init`, `-r`, `-b`, `-o`, `-s`, or `-k`, and it never starts a build. The session may use only `Read`, `Glob`, and `Grep`. Use `-m` and `-e` to choose the model and effort, and `-c` and `-d` if your config or project is not in the default place.
+
+#### `--check-update`, `--update`
+
+`--check-update` asks GitHub for the latest release and says whether it is newer than the version you run. It changes nothing. `--update` does the same, then asks before it downloads and runs the installer for that release (it needs a terminal). Both are long form only, stand alone, need no config or project, and need `curl` or `wget`. `--update` refuses a git clone and shows the `git pull` command instead.
+
 #### `--version`
 
 Print the version and exit.
@@ -460,6 +474,9 @@ claude-build -d ~/Workspace/blog -S docs/PROGRESS.md -i docs/ -r      no config 
 | -k | --stop | off |
 | -h | --help | |
 | -I | --interactive | off. With `--init`, ask questions in the terminal |
+| | --check-update | off. Say whether a newer release exists |
+| | --update | off. Install the newest release, after asking |
+| | --guide | off. Interactive help from Claude. Asks before using tokens |
 | | --init | off. Draft the state file from the `-i` paths. Preview unless `-r` |
 | | --version | |
 | -c | --config FILE | claude-build.conf beside the script |

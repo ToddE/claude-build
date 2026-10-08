@@ -40,7 +40,7 @@ REQUIRE_GIT=1
 REDACT_FILES=(".env.local")
 CONFIG=""              # chosen below: -c, else ./claude-build.conf in the current folder, else the one beside this script
 CONFIG_GIVEN=0
-ONCE=0; RUN=0; VIEW=0; BACKGROUND=0; STOPIT=0; VERBOSE=0; INIT=0; ASK=0; POSITIONAL=()   # VIEW = status-only mode (-s), INIT = plan mode (--init), ASK = interactive plan mode (-I)
+ONCE=0; RUN=0; VIEW=0; BACKGROUND=0; STOPIT=0; VERBOSE=0; INIT=0; ASK=0; GUIDE=0; CHECK_UPDATE=0; UPDATE=0; POSITIONAL=()   # VIEW = status-only mode (-s), INIT = plan mode (--init), ASK = interactive plan mode (-I)
 
 # Bundled short flags: -rv is -r -v, and -vrc FILE is -v -r -c FILE. Letters that take a value must come last in a bundle.
 expand_flags() {
@@ -79,6 +79,10 @@ MODES
   -b                  really run, in the background, then return to the terminal
   -o                  run one cycle, then exit (for cron or a timer)
   -k                  stop the background build
+  --check-update      look for a newer release on GitHub and say so. Changes nothing
+  --update            install the newest release (asks first). The only other network use
+  --guide             stuck? opens an interactive Claude session that helps you choose flags and fix your setup.
+                      Uses tokens, so it shows an estimate and asks first. Never starts a build
   --init PLAN.md      draft the state file from your plan with a model. A preview until you add -r.
                       Unclear points go under "## Open questions" (STATUS: blocked). Add -I to be asked
                       instead, in this terminal. Best results: answer scope questions upstream, in the plan
@@ -142,6 +146,9 @@ FLAGS  (a flag overrides the config file, which overrides the built-in default)
   -a, --after-run SECONDS    wait after a good run             [$AFTER_RUN]
   -l, --log-dir DIR          logs, lock, and stop file         [$LOG_DIR]
   -h, --help                 show this text
+      --guide                interactive help from Claude (asks before using tokens)
+      --check-update         check GitHub for a newer release (the script never checks on its own)
+      --update               install the newest release, after asking
       --version              print the version and exit
       --init [PATH...]       draft the state file from the plan paths (or -i) with the -m model. Add -r to run it
   -I, --interactive          with --init: the model asks you questions in this terminal first
@@ -264,6 +271,9 @@ while [ $# -gt 0 ]; do
     -k|--stop) STOPIT=1; shift ;;
     -h|--help) usage; exit 0 ;;
     --init) INIT=1; shift ;;
+    --guide) GUIDE=1; shift ;;
+    --check-update) CHECK_UPDATE=1; shift ;;
+    --update) UPDATE=1; shift ;;
     -I|--interactive) ASK=1; shift ;;
     --version) echo "$NAME $VERSION"; exit 0 ;;
     -*) echo "unknown option: $1 (try -h)"; exit 64 ;;
@@ -282,16 +292,49 @@ if [ $(( RUN + BACKGROUND + ONCE )) -gt 1 ]; then echo "Choose one of -r (run he
 if [ $STOPIT -eq 1 ] && [ $(( RUN + BACKGROUND + ONCE + VIEW )) -gt 0 ]; then echo "-k (stop) cannot be combined with -r, -b, -o, or -s."; exit 64; fi
 if [ $VIEW -eq 1 ] && [ $(( RUN + BACKGROUND + ONCE )) -gt 0 ]; then echo "-s (status) cannot be combined with -r, -b, or -o. Add -v to a run flag to see the state before it starts."; exit 64; fi
 
+if [ $GUIDE -eq 1 ] && [ $(( INIT + RUN + BACKGROUND + ONCE + VIEW + STOPIT )) -gt 0 ]; then echo "--guide stands alone. It only helps you choose flags (add -c, -d, -m if needed)."; exit 64; fi
 if [ $INIT -eq 1 ] && [ $(( BACKGROUND + ONCE + VIEW + STOPIT )) -gt 0 ]; then echo "--init cannot be combined with -b, -o, -s, or -k. Use --init alone to preview, or --init -r to write the state file."; exit 64; fi
 
-# ---------- find and enter the project ----------
-if [ -z "$PROJECT_DIR" ]; then
-  if [ -d "$(dirname "$SCRIPT_PATH")/../.git" ]; then PROJECT_DIR="$(readlink -f "$(dirname "$SCRIPT_PATH")/..")"
-  else echo "No project folder. Set PROJECT_DIR in a claude-build.conf (in the current folder or beside the script), or pass -d FOLDER. Not guessing from the current folder."; exit 64; fi
+if [ $(( CHECK_UPDATE + UPDATE )) -gt 0 ] && [ $(( GUIDE + INIT + RUN + BACKGROUND + ONCE + VIEW + STOPIT + ASK )) -gt 0 -o $(( CHECK_UPDATE + UPDATE )) -gt 1 ]; then echo "--check-update and --update stand alone, one at a time."; exit 64; fi
+
+# ---------- --check-update and --update: the only network use. Nothing here runs unless you ask ----------
+REPO="ToddE/claude-build"
+RELEASE_URL="${CLAUDE_BUILD_RELEASE_URL:-https://api.github.com/repos/$REPO/releases/latest}"   # overridable for tests
+fetch() { if command -v curl >/dev/null 2>&1; then curl -fsSL "$1"; elif command -v wget >/dev/null 2>&1; then wget -qO- "$1"; else return 127; fi; }
+if [ $(( CHECK_UPDATE + UPDATE )) -gt 0 ]; then
+  command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || { echo "need curl or wget to check for updates"; exit 1; }
+  latest="$(fetch "$RELEASE_URL" 2>/dev/null | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)"
+  if [ -z "$latest" ]; then echo "No release found (or GitHub could not be reached). This is version $VERSION. See https://github.com/$REPO/releases"; exit 1; fi
+  newest="$(printf '%s\n%s\n' "${latest#v}" "$VERSION" | sort -V | tail -n 1)"
+  if [ "${latest#v}" = "$VERSION" ] || [ "$newest" = "$VERSION" ]; then echo "$NAME $VERSION is up to date (latest release: $latest)."; exit 0; fi
+  if [ $CHECK_UPDATE -eq 1 ]; then echo "$NAME $VERSION is installed. Version ${latest#v} is available. Update with: $NAME --update"; exit 0; fi
+  # --update: only for a copy the installer made. A git clone is updated with git.
+  case "$SCRIPT_PATH" in
+    */share/claude-build/*) ;;
+    *) echo "$SCRIPT_PATH is not an installer copy. Version ${latest#v} is available. If this is a git clone, run: git -C \"$(dirname "$SCRIPT_PATH")\" pull"; exit 1 ;;
+  esac
+  [ -t 0 ] && [ -t 1 ] || { echo "--update asks for confirmation, so it needs a terminal. Or run the installer directly (see the README)."; exit 64; }
+  echo "Update $NAME from $VERSION to ${latest#v}."
+  echo "This downloads and runs https://raw.githubusercontent.com/$REPO/$latest/install.sh. Older versions stay in place, and your config is not changed."
+  read -r -p "Continue? [y/N] " ans
+  case "$ans" in y|Y|yes|YES) ;; *) echo "Not updated."; exit 0 ;; esac
+  fetch "https://raw.githubusercontent.com/$REPO/$latest/install.sh" | CLAUDE_BUILD_VERSION="$latest" bash
+  exit $?
 fi
-[ -d "$PROJECT_DIR" ] || { echo "project folder not found: $PROJECT_DIR"; exit 64; }
-cd "$PROJECT_DIR" || exit 64
-[ -f "$STATE_FILE" ] || [ $INIT -eq 1 ] || { echo "state file not found: $STATE_FILE (looked in $(pwd)). It needs STATUS, NEXT, and a task table. See README.md, section 4. To have a model draft one from your plan: $NAME --init -i PLAN.md"; exit 64; }
+
+# ---------- find and enter the project ----------
+if [ $GUIDE -eq 1 ]; then   # --guide helps people who are stuck, so a missing project or state file is not an error here
+  if [ -z "$PROJECT_DIR" ] && [ -d "$(dirname "$SCRIPT_PATH")/../.git" ]; then PROJECT_DIR="$(readlink -f "$(dirname "$SCRIPT_PATH")/..")"; fi
+  if [ -n "$PROJECT_DIR" ] && [ -d "$PROJECT_DIR" ]; then cd "$PROJECT_DIR" || PROJECT_DIR=""; else PROJECT_DIR=""; fi
+else
+  if [ -z "$PROJECT_DIR" ]; then
+    if [ -d "$(dirname "$SCRIPT_PATH")/../.git" ]; then PROJECT_DIR="$(readlink -f "$(dirname "$SCRIPT_PATH")/..")"
+    else echo "No project folder. Set PROJECT_DIR in a claude-build.conf (in the current folder or beside the script), or pass -d FOLDER. Not guessing from the current folder. Stuck? Run: $NAME --guide"; exit 64; fi
+  fi
+  [ -d "$PROJECT_DIR" ] || { echo "project folder not found: $PROJECT_DIR. Stuck? Run: $NAME --guide"; exit 64; }
+  cd "$PROJECT_DIR" || exit 64
+  [ -f "$STATE_FILE" ] || [ $INIT -eq 1 ] || { echo "state file not found: $STATE_FILE (looked in $(pwd)). It needs STATUS, NEXT, and a task table. See README.md, section 4. To have a model draft one from your plan: $NAME --init PLAN.md. Stuck? Run: $NAME --guide"; exit 64; }
+fi
 LOG="$LOG_DIR/build.log"; LOCK="$LOG_DIR/build.lock"; BACKOFF="$LOG_DIR/backoff_until"; FAILS="$LOG_DIR/failures"; STOP="$LOG_DIR/stop"
 
 proj_path() { case "$1" in /*) printf %s "$1" ;; *) printf %s "$PWD/$1" ;; esac; }   # absolute path for a project-relative one
@@ -464,6 +507,73 @@ if [ $INIT -eq 1 ]; then
   echo "Then preview with:  $(self_cmd) -v"
   echo "and start with:     $(self_cmd) -b"
   exit 0
+fi
+
+# ---------- --guide: an interactive Claude session that helps you choose flags and fix a setup ----------
+guide_snapshot() {
+  local t m="" st="" nx="" dn=0 tt=0
+  echo "- claude-build version: $VERSION (script: $SCRIPT_PATH, typed as: $NAME)"
+  echo "- bash: $BASH_VERSION (needs 4.4 or newer). System: $(uname -sr 2>/dev/null)"
+  for t in git setsid timeout readlink stat awk sed; do command -v "$t" >/dev/null 2>&1 || m="$m $t"; done
+  echo "- missing tools:${m:- none}"
+  echo "- claude command ($CLAUDE_BIN): $(command -v "$CLAUDE_BIN" >/dev/null 2>&1 && echo found || echo NOT FOUND)"
+  echo "- config in use: $CONFIG_USED"
+  echo "- current folder: $ORIG_PWD"
+  if [ -n "$PROJECT_DIR" ]; then
+    echo "- project folder: $PROJECT_DIR ($([ -d .git ] && echo "a git repository" || echo "NOT a git repository"))"
+    if [ -f "$STATE_FILE" ]; then
+      st=$(state STATUS); nx=$(state NEXT); read -r dn tt <<< "$(task_counts)"
+      echo "- state file $STATE_FILE: found. STATUS=${st:-missing} NEXT=${nx:-missing} tasks done=$dn of $tt"
+      [ "$tt" -eq 0 ] && echo "  (no task table recognized: it needs a header row with Id and Status columns)"
+    else echo "- state file $STATE_FILE: NOT FOUND"; fi
+    echo "- plan files present: $(ls PLAN.md docs 2>/dev/null | tr '\n' ' ')"
+    if [ -f "$LOG" ]; then echo "- last log lines:"; tail -n 10 "$LOG" | redact_log | sed 's/^/    /'; else echo "- log: none yet"; fi
+  else echo "- project folder: NOT SET or not found (set PROJECT_DIR in the config, or pass -d FOLDER)"; fi
+  echo "- fallback model: $MODEL; context files: ${CONTEXT_FILES[*]:-none}"
+}
+guide_prompt() {
+  local dir; dir="$(dirname "$SCRIPT_PATH")"
+  cat <<END_OF_GUIDE
+You are the setup guide for claude-build $VERSION, a bash tool that runs a long Claude Code build from a state file. The person talking to you is having trouble getting started or choosing flags. Interview them, use the snapshot below, and give them exact commands to run.
+
+Documentation: the manual is $dir/README.md and examples are in $dir/examples/ (config, plan, state file). Read only the sections you need. Section 1 is the quick start, section 3 explains each flag, section 4 is the state file. The built-in help follows.
+
+Rules:
+- Ask one question at a time, and start with what they want to do: set up a first build, fix an error, or change how a build runs. Do not ask for anything the snapshot already shows.
+- Give the exact command to type and say what it will do. Always give the preview form first (no -r, -b, or -o). A run flag starts work that spends tokens, so say so when you suggest one.
+- You cannot run claude-build for them. You can read files. Do not suggest editing files you have not read.
+- If there is no state file and they have a plan, suggest: $NAME --init PLAN.md. If there is no plan, tell them to write one or use a planning step first (the README, "Where the plan comes from").
+- Explain in plain language and keep answers short. Mention macOS only to say the tool currently targets Linux.
+
+SNAPSHOT
+$(guide_snapshot)
+
+BUILT-IN HELP
+$(usage)
+END_OF_GUIDE
+}
+if [ $GUIDE -eq 1 ]; then
+  [ -t 0 ] && [ -t 1 ] || { echo "--guide needs a terminal."; exit 64; }
+  command -v "$CLAUDE_BIN" >/dev/null 2>&1 || { echo "The claude command ($CLAUDE_BIN) was not found, so the guide cannot start. Install and log in to Claude Code first, then read $(dirname "$SCRIPT_PATH")/README.md, section 1."; exit 1; }
+  GUIDE_TEXT="$(guide_prompt)"
+  gdir="$(dirname "$SCRIPT_PATH")"; g_prompt_tokens=$(( ${#GUIDE_TEXT} / 4 )); g_readme_tokens=0
+  [ -f "$gdir/README.md" ] && g_readme_tokens=$(( $(wc -c < "$gdir/README.md") / 4 ))
+  GUIDE_EFFORT="$EFFORT"; if [ "$EFFORT_FROM_STATE" -eq 1 ]; then for kv in "${EFFORT_DEFAULTS[@]+"${EFFORT_DEFAULTS[@]}"}"; do [ "${kv%%=*}" = "$MODEL" ] && GUIDE_EFFORT="${kv#*=}"; done; fi
+  echo "$NAME --guide opens an interactive Claude session that helps you choose flags and fix your setup."
+  echo "It uses tokens from your Claude plan or API account for the whole conversation. It does not start a build."
+  echo
+  echo "  model:               $MODEL, effort ${GUIDE_EFFORT:-default}   (change with -m and -e)"
+  echo "  starting size:       about $g_prompt_tokens tokens (the instructions, your setup details, and the help text)"
+  [ $g_readme_tokens -gt 0 ] && echo "  if it reads the README: about $g_readme_tokens more tokens ($(( g_prompt_tokens + g_readme_tokens )) in all)"
+  echo "  as you talk:         every question and answer adds to the conversation, and the conversation is sent again on each turn"
+  echo "  estimates only:      characters divided by 4. Inside the session, type /cost for real usage and /context for the size"
+  echo
+  read -r -p "Continue? [y/N] " ans
+  case "$ans" in y|Y|yes|YES) ;; *) echo "Not started. Nothing was used."; exit 0 ;; esac
+  gcmd=("$GUIDE_TEXT" --model "$MODEL")
+  [ -n "$GUIDE_EFFORT" ] && gcmd+=(--effort "$GUIDE_EFFORT")
+  gcmd+=(--add-dir "$gdir" --allowedTools Read Glob Grep)
+  exec "$CLAUDE_BIN" "${gcmd[@]}"
 fi
 
 # ---------- -k: stop the background build ----------
