@@ -7,6 +7,7 @@
 # then claude-build.conf, then command-line flags. See README.md in this folder.
 
 # Author: Todd Emerson (github: ToddE) with coding assistance from Claude Code Sonnet 5.5
+# see https://github.com/ToddE/claude-build/README.md for more information.
 set -u
 VERSION="0.1.0"
 
