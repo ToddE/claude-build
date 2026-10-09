@@ -572,8 +572,8 @@ if [ $INIT -eq 1 ]; then
     "$CLAUDE_BIN" "$(init_prompt)" "${common[@]}"; code=$?
   else
     log_msg "planning: drafting $STATE_FILE on $MODEL, effort ${INIT_EFFORT:-default}, from ${CONTEXT_FILES[*]}"
-    if [ $VERBOSE -ge 1 ]; then timeout "$TIMEOUT" "$CLAUDE_BIN" -p "$(init_prompt)" --output-format text "${common[@]}" 2>&1 | tee -a "$LOG"; code=${PIPESTATUS[0]}
-    else timeout "$TIMEOUT" "$CLAUDE_BIN" -p "$(init_prompt)" --output-format text "${common[@]}" >> "$LOG" 2>&1; code=$?; fi
+    if [ $VERBOSE -ge 1 ]; then timeout --foreground "$TIMEOUT" "$CLAUDE_BIN" -p "$(init_prompt)" --output-format text "${common[@]}" 2>&1 | tee -a "$LOG"; code=${PIPESTATUS[0]}
+    else timeout --foreground "$TIMEOUT" "$CLAUDE_BIN" -p "$(init_prompt)" --output-format text "${common[@]}" >> "$LOG" 2>&1; code=$?; fi
   fi
   [ $code -eq 0 ] || { log_msg "planning failed (code $code). See $LOG"; exit 1; }
   [ -f "$STATE_FILE" ] || { log_msg "planning finished but $STATE_FILE was not created. See $LOG"; exit 1; }
@@ -728,7 +728,7 @@ FACTS
 - Most recent finished tasks: $(recent_done 8 | tr '\n' ';')
 - Recent commits: $(git log --oneline -n 8 2>/dev/null | tr '\n' ';')
 - The model's last message in the final run: ${last}"
-  timeout 180 "$CLAUDE_BIN" -p "$prompt" --model "$REPORT_MODEL" ${REPORT_EFFORT:+--effort "$REPORT_EFFORT"} --max-turns 1 --output-format text 2>>"$LOG"
+  timeout --foreground 180 "$CLAUDE_BIN" -p "$prompt" --model "$REPORT_MODEL" ${REPORT_EFFORT:+--effort "$REPORT_EFFORT"} --max-turns 1 --output-format text 2>>"$LOG"
 }
 # The steps to restart after a gate or a block, in words and exact edits. $1 = gate or blocked, $2 = term or md.
 continue_steps() {
@@ -1012,14 +1012,14 @@ resume_build() {
     # Progress while the run works. The raw stream is kept in LOG_DIR/last-run.jsonl.
     OUT_FORMAT=stream-json; cmd=(); while IFS= read -r -d '' a; do cmd+=("$a"); done < <(claude_args)
     if [ $VERBOSE -ge 1 ]; then
-      timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" 2>&1 | tee "$LOG_DIR/last-run.jsonl" | progress_lines | tee -a "$LOG" | tool_mark | style_lines | tool_ticker; code=${PIPESTATUS[0]}
+      timeout --foreground "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" 2>&1 | tee "$LOG_DIR/last-run.jsonl" | progress_lines | tee -a "$LOG" | tool_mark | style_lines | tool_ticker; code=${PIPESTATUS[0]}
     else
-      timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" 2>&1 | tee "$LOG_DIR/last-run.jsonl" | progress_lines >> "$LOG"; code=${PIPESTATUS[0]}
+      timeout --foreground "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" 2>&1 | tee "$LOG_DIR/last-run.jsonl" | progress_lines >> "$LOG"; code=${PIPESTATUS[0]}
     fi
   elif [ $VERBOSE -ge 1 ]; then   # no jq: the output appears when the run ends
-    timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" 2>&1 | tee -a "$LOG"; code=${PIPESTATUS[0]}
+    timeout --foreground "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" 2>&1 | tee -a "$LOG"; code=${PIPESTATUS[0]}
   else
-    timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" >> "$LOG" 2>&1; code=$?
+    timeout --foreground "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" >> "$LOG" 2>&1; code=$?
   fi
   stop_spinner; rm -f "$CURRENT"
   if [ "$STREAM" -eq 1 ] && command -v jq >/dev/null 2>&1 && [ -f "$LOG_DIR/last-run.jsonl" ]; then
