@@ -97,7 +97,7 @@ MODES
   flags, no -r/-b/-o/-s   PREVIEW: shows the project, settings, and the exact prompt. Starts nothing
   -s                  status: print the last state and the end of the log (works after the build ended)
   --ready             after a gate or block: change STATUS to ready in the state file (then start the build)
-  --watch             status that refreshes every 5 seconds (WATCH_EVERY) until Ctrl+C. Run it in a second terminal
+  --watch             live dashboard. With -r or -b it starts the build too. Alone it watches a running build
   -r                  really run, in this terminal. Quiet: a line per step
   -b                  really run, in the background, then return to the terminal
   -o                  run one cycle, then exit (for cron or a timer)
@@ -174,7 +174,7 @@ FLAGS  (a flag overrides the config file, which overrides the built-in default)
   -l, --log-dir DIR          logs, lock, and stop file         [$LOG_DIR]
   -h, --help                 show this text
       --ready                change STATUS from gate or blocked to ready, then you start the build
-      --watch                like -s, redrawn every 5 seconds until Ctrl+C
+      --watch                live dashboard. -r --watch or -b --watch starts the build; alone it needs a running one
       --guide                interactive help from Claude (asks before using tokens)
       --check-update         check GitHub for a newer release (the script never checks on its own)
       --update               install the newest release, after asking
@@ -212,10 +212,25 @@ WHERE IT RUNS FROM
 CONFIG FILE
   ${CONFIG_USED}
   Plain shell: KEY=value lines and arrays. It is executed, so only trust your own.
-  Keys: PROJECT_NAME PROJECT_DIR STATE_FILE PROMPT PROMPT_FILE CONTEXT_FILES MODEL
-  MODEL_FROM_STATE EFFORT EFFORT_FROM_STATE EFFORT_DEFAULTS
-  PERMISSION_MODE ALLOWED_TOOLS EXTRA_CLAUDE_ARGS CLAUDE_BIN TASKS_PER_RUN TIMEOUT
-  INTERVAL AFTER_RUN BACKOFF_STEPS LOG_DIR REQUIRE_GIT REDACT_FILES
+  Settings have no flags unless a flag is shown under FLAGS. examples/claude-build.conf
+  explains each one.
+  Project:   PROJECT_NAME PROJECT_DIR STATE_FILE CONTEXT_FILES LOG_DIR REQUIRE_GIT
+  Prompt:    PROMPT PROMPT_FILE
+  Models:    MODEL MODEL_FROM_STATE EFFORT EFFORT_FROM_STATE EFFORT_DEFAULTS
+  Sessions:  PERMISSION_MODE ALLOWED_TOOLS EXTRA_CLAUDE_ARGS CLAUDE_BIN TASKS_PER_RUN
+             TIMEOUT BG_WAIT_CEILING_MS
+  Timing:    INTERVAL AFTER_RUN BACKOFF_STEPS
+  Gates:     GATE_MODE GATE_CHECKS GATE_FIX_TRIES FIX_MODELS CHECK_TIMEOUT TEST_GLOBS
+  Reports:   REPORT REPORT_MODEL REPORT_EFFORT REDACT_FILES
+  Safety:    SNAPSHOT_EVERY SNAPSHOT_KEEP
+  Display:   STREAM WATCH_EVERY
+
+REVIEW POINTS AND CHECKS
+  A task row whose Task starts with GATE pauses the build for your review. GATE! always pauses.
+  GATE_MODE="continue" records GATE rows in the final report instead of pausing.
+  GATE_CHECKS=("npm test" "npm run lint") are commands claude-build runs itself at each gate and
+  at the end. A failure starts a fix session (GATE_FIX_TRIES, FIX_MODELS), then the checks run
+  again. If they still fail, the build stops as blocked. The report lists test files a fix changed.
 
 STATE FILE FORMAT  (the only thing a project must provide)
   STATUS: ready          ready, blocked, gate, or done
