@@ -282,7 +282,7 @@ while [ $# -gt 0 ]; do
     -r|--run) RUN=1; shift ;;
     -o|--once) ONCE=1; shift ;;
     -s|--status) VIEW=1; shift ;;
-    -v|--verbose) VERBOSE=1; shift ;;
+    -v|--verbose) VERBOSE=$((VERBOSE+1)); shift ;;
     -b|--background) BACKGROUND=1; shift ;;
     -k|--stop) STOPIT=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -451,6 +451,16 @@ claude_args() {
   [ ${#EXTRA_CLAUDE_ARGS[@]} -gt 0 ] && printf '%s\0' "${EXTRA_CLAUDE_ARGS[@]}"
 }
 
+# Says how to start the build and what that does. $1 = heading, $2 = term or md.
+start_block() {
+  local next title b="" c="" n="" cmd
+  next="$(state NEXT)"; title="$(task_cell "$next" Task)"; cmd="$(self_cmd)"
+  if [ "$2" = term ]; then b="$C_B"; n="$C_N"; c="$C_C"; fi
+  echo "${b}$1${n}"
+  echo "  Command: ${c}$cmd -rv${n}"
+  echo "  What it does: runs in this terminal and shows each step as it works. It picks up at task ${next:-?}${title:+ ($(echo "$title" | cut -c1-80))}, keeps going, and stops at the next review point or problem, with a new report."
+  echo "  To run it in the background instead, use ${c}-b${n} in place of ${c}-rv${n}, and watch it with ${c}$cmd --watch${n}."
+}
 # ---------- --ready: make the one-line edit that lets a paused build continue ----------
 if [ $READY -eq 1 ]; then
   st="$(state STATUS)"
@@ -562,7 +572,7 @@ if [ $INIT -eq 1 ]; then
     "$CLAUDE_BIN" "$(init_prompt)" "${common[@]}"; code=$?
   else
     log_msg "planning: drafting $STATE_FILE on $MODEL, effort ${INIT_EFFORT:-default}, from ${CONTEXT_FILES[*]}"
-    if [ $VERBOSE -eq 1 ]; then timeout "$TIMEOUT" "$CLAUDE_BIN" -p "$(init_prompt)" --output-format text "${common[@]}" 2>&1 | tee -a "$LOG"; code=${PIPESTATUS[0]}
+    if [ $VERBOSE -ge 1 ]; then timeout "$TIMEOUT" "$CLAUDE_BIN" -p "$(init_prompt)" --output-format text "${common[@]}" 2>&1 | tee -a "$LOG"; code=${PIPESTATUS[0]}
     else timeout "$TIMEOUT" "$CLAUDE_BIN" -p "$(init_prompt)" --output-format text "${common[@]}" >> "$LOG" 2>&1; code=$?; fi
   fi
   [ $code -eq 0 ] || { log_msg "planning failed (code $code). See $LOG"; exit 1; }
@@ -720,16 +730,6 @@ FACTS
 - The model's last message in the final run: ${last}"
   timeout 180 "$CLAUDE_BIN" -p "$prompt" --model "$REPORT_MODEL" ${REPORT_EFFORT:+--effort "$REPORT_EFFORT"} --max-turns 1 --output-format text 2>>"$LOG"
 }
-# Says how to start the build and what that does. $1 = heading, $2 = term or md.
-start_block() {
-  local next title b="" c="" n="" cmd
-  next="$(state NEXT)"; title="$(task_cell "$next" Task)"; cmd="$(self_cmd)"
-  if [ "$2" = term ]; then b="$C_B"; n="$C_N"; c="$C_C"; fi
-  echo "${b}$1${n}"
-  echo "  Command: ${c}$cmd -rv${n}"
-  echo "  What it does: runs in this terminal and shows each step as it works. It picks up at task ${next:-?}${title:+ ($(echo "$title" | cut -c1-80))}, keeps going, and stops at the next review point or problem, with a new report."
-  echo "  To run it in the background instead, use ${c}-b${n} in place of ${c}-rv${n}, and watch it with ${c}$cmd --watch${n}."
-}
 # The steps to restart after a gate or a block, in words and exact edits. $1 = gate or blocked, $2 = term or md.
 continue_steps() {
   local kind="$1" fmt="$2" ln next title b="" c="" n="" cmd
@@ -860,9 +860,11 @@ show_state() {
   if [ -d .git ]; then echo "  changes:    $(git status --short 2>/dev/null | wc -l) uncommitted files. Last commit: $(git log -1 --format='%h %s' 2>/dev/null | cut -c1-70)"; fi
   table_warnings | sed 's/^/  /'
   rd=$(recent_done 5); if [ -n "$rd" ]; then echo "  recent:"; while IFS='|' read -r i t; do echo "    $i  $t"; done <<< "$rd"; fi
-  echo; echo "log, last 15 lines ($(proj_path "$LOG")):"
-  if [ -f "$LOG" ]; then tail -n 15 "$LOG" | redact_log | sed 's/^/  /'; else echo "  no log yet"; fi
-  echo; echo "follow it live: tail -f $(proj_path "$LOG")"
+  if [ "${1:-}" != nolog ]; then
+    echo; echo "log, last 15 lines ($(proj_path "$LOG")):"
+    if [ -f "$LOG" ]; then tail -n 15 "$LOG" | redact_log | sed 's/^/  /'; else echo "  no log yet"; fi
+    echo; echo "follow it live: tail -f $(proj_path "$LOG")"
+  fi
 }
 # -s: print the report and exit. --watch: redraw it every few seconds until Ctrl+C.
 if [ $VIEW -eq 1 ]; then
@@ -879,7 +881,7 @@ fi
 
 # ---------- preview (flags without -r, -b, or -o) ----------
 if [ $RUN -eq 0 ] && [ $ONCE -eq 0 ] && [ $BACKGROUND -eq 0 ]; then
-  if [ $VERBOSE -eq 1 ]; then show_state; echo; fi
+  if [ $VERBOSE -ge 1 ]; then show_state nolog; echo; fi
   echo "PREVIEW ONLY. Nothing was started."; echo "config:    $CONFIG_USED"; echo "project:   $(pwd)"; echo "state:     $STATE_FILE   ($(task_counts) done/total)"
   table_warnings
   plan_run "$(state NEXT)"
@@ -887,7 +889,7 @@ if [ $RUN -eq 0 ] && [ $ONCE -eq 0 ] && [ $BACKGROUND -eq 0 ]; then
   echo "model:     $([ "$MODEL_FROM_STATE" -eq 1 ] && echo "from each task's Model column, fallback $MODEL" || echo "$MODEL for every run (fixed)")"
   echo "effort:    $([ "$EFFORT_FROM_STATE" -eq 1 ] && echo "from each task's Effort column, else by model ($(echo "${EFFORT_DEFAULTS[*]}"))" || echo "${EFFORT:-Claude Code default} for every run (fixed)")"
   echo "next run:  task $(state NEXT) on $RUN_MODEL, effort ${RUN_EFFORT:-default}"
-  echo "progress:  $([ "$STREAM" -eq 1 ] && command -v jq >/dev/null 2>&1 && echo "live, one line per step, in the log$([ $VERBOSE -eq 1 ] && echo " and this terminal")" || echo "output appears when each run ends (install jq for live progress, STREAM=1)")"
+  echo "progress:  $([ "$STREAM" -eq 1 ] && command -v jq >/dev/null 2>&1 && echo "live, one line per step, in the log$([ $VERBOSE -ge 1 ] && echo " and this terminal")" || echo "output appears when each run ends (install jq for live progress, STREAM=1)")"
   echo "context:   ${CONTEXT_FILES[*]:-none}"
   for c in "${CONTEXT_FILES[@]+"${CONTEXT_FILES[@]}"}"; do [ -e "$c" ] || echo "  warning: context path not found: $c"; done
   echo "allowed:   ${ALLOWED_TOOLS[*]}"; echo "prompt:"; build_prompt | fold -s -w 100 | sed 's/^/  /'; echo
@@ -901,7 +903,7 @@ if [ $BACKGROUND -eq 1 ]; then
   if [ "$REQUIRE_GIT" -eq 1 ] && [ ! -d .git ]; then echo "cannot run: run git init first so each task is checkpointed"; exit 1; fi
   mkdir -p "$LOG_DIR"
   if alive "$LOCK" claude-build; then echo "Already running (pid $(cat "$LOCK")). Stop it with -k, or look at it with -s."; exit 0; fi
-  if [ $VERBOSE -eq 1 ]; then show_state; echo; fi
+  if [ $VERBOSE -ge 1 ]; then show_state nolog; echo; fi
   pass=(); for a in "${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}"; do case "$a" in -b|--background|-v|--view) ;; *) pass+=("$a") ;; esac; done
   setsid -f "$SCRIPT_PATH" "${pass[@]+"${pass[@]}"}" -r >> "$LOG_DIR/supervisor.log" 2>&1 < /dev/null
   sleep 2
@@ -916,7 +918,7 @@ fi
 
 # ---------- run: one copy at a time ----------
 # The report comes first, so it shows the state before this run takes the lock.
-if [ $VERBOSE -eq 1 ]; then show_state; echo; fi
+if [ $VERBOSE -ge 1 ]; then show_state nolog; echo; fi
 mkdir -p "$LOG_DIR"
 if alive "$LOCK" claude-build; then echo "already running (pid $(cat "$LOCK"))"; exit 0; fi
 echo $$ > "$LOCK"
@@ -956,6 +958,33 @@ style_lines() {
     -e "s/^( *)[-*] /\\1• /"
 }
 
+# With -v on a terminal, look-around commands (reading files, grep, ls, and the like) are not printed one by one.
+# They become a single dim line that is overwritten as the model works, so you can see it is busy. -vv prints every step.
+# The log always keeps every step.
+tool_mark() {
+  if [ "$VERBOSE" -ge 2 ] || [ -z "$C_N" ]; then cat; return; fi
+  awk '
+    function noisy(line,   t, name, cmd, n, seg, i, s) {
+      if (line !~ /^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]   [A-Za-z_]+: /) return 0
+      t = line; sub(/^[0-9:]+   /, "", t); name = t; sub(/:.*/, "", name)
+      if (name == "Read" || name == "Glob" || name == "Grep") return 1
+      if (name == "Bash") {
+        cmd = t; sub(/^Bash: /, "", cmd); n = split(cmd, seg, /[;&|]+/)
+        for (i = 1; i <= n; i++) { s = seg[i]; gsub(/^[ \t]+/, "", s); if (s == "") continue
+          if (s !~ /^(cat|ls|sed -n|grep|head|tail|wc|diff|find|echo|pwd|sort|cut|awk|test|git (status|diff|log|ls-files|show))( |$)/) return 0 }
+        return 1 }
+      return 0 }
+    { if (noisy($0)) print "\001" $0; else print; fflush() }'
+}
+tool_ticker() {
+  if [ "$VERBOSE" -ge 2 ] || [ -z "$C_N" ]; then cat; return; fi
+  awk -v w="$(tput cols 2>/dev/null || echo 100)" '
+    { if (substr($0, 1, 1) == "\001") { l = substr($0, 2); gsub(/\033\[[0-9;]*m/, "", l); printf "\r\033[2K\033[2m  … %s\033[0m", substr(l, 1, w - 6); shown = 1; fflush(); next }
+      if (shown) { printf "\r\033[2K"; shown = 0 }
+      print; fflush() }
+    END { if (shown) printf "\r\033[2K" }'
+}
+
 # Turns Claude's stream-json lines into one readable line per step: what the model says, and each tool it uses.
 progress_lines() {
   jq -Rr --unbuffered '
@@ -982,12 +1011,12 @@ resume_build() {
   if [ "$STREAM" -eq 1 ] && command -v jq >/dev/null 2>&1; then
     # Progress while the run works. The raw stream is kept in LOG_DIR/last-run.jsonl.
     OUT_FORMAT=stream-json; cmd=(); while IFS= read -r -d '' a; do cmd+=("$a"); done < <(claude_args)
-    if [ $VERBOSE -eq 1 ]; then
-      timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" 2>&1 | tee "$LOG_DIR/last-run.jsonl" | progress_lines | tee -a "$LOG" | style_lines; code=${PIPESTATUS[0]}
+    if [ $VERBOSE -ge 1 ]; then
+      timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" 2>&1 | tee "$LOG_DIR/last-run.jsonl" | progress_lines | tee -a "$LOG" | tool_mark | style_lines | tool_ticker; code=${PIPESTATUS[0]}
     else
       timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" 2>&1 | tee "$LOG_DIR/last-run.jsonl" | progress_lines >> "$LOG"; code=${PIPESTATUS[0]}
     fi
-  elif [ $VERBOSE -eq 1 ]; then   # no jq: the output appears when the run ends
+  elif [ $VERBOSE -ge 1 ]; then   # no jq: the output appears when the run ends
     timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" 2>&1 | tee -a "$LOG"; code=${PIPESTATUS[0]}
   else
     timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" >> "$LOG" 2>&1; code=$?
