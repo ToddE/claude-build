@@ -344,7 +344,23 @@ claude-build -c ~/builds/blog.conf -s
 
 #### `--watch`
 
-Status that refreshes. It shows the same report as `-s` and redraws it every 5 seconds until you press Ctrl+C (change the interval with `WATCH_EVERY=2 claude-build --watch`). Run it in a second terminal while a build works. Besides the status, next task, and task count, it shows how long the current run has been going and how many files have changed in the project since the last commit, so you can see a task taking shape before it is committed. It needs a terminal and cannot be combined with a run flag.
+Status that stays up to date. Run it in a second terminal while a build works. It shows an animated header over the same report as `-s`, and redraws the report every 5 seconds until you press Ctrl+C (change the interval with `WATCH_EVERY=2 claude-build --watch`, or `WATCH_EVERY` in the config). It needs a terminal and cannot be combined with a run flag.
+
+`--watch` follows the build to its end. When the build stops (it finished, reached a review point, was blocked, or was stopped with `-k` or `--kill-now`), the watch leaves its last picture on the screen, prints how the build ended and what to do next, and returns you to the shell prompt. If no build is running when you start it, it says so and exits.
+
+```
+⠹ ▒▓█▓▒░······················  working on task 2.2 (sonnet) 4m12s
+██████░░░░░░░░░░░░░░ 16/66 (24%)  activity ▁▁▃▅█▂▁▁▄▆█▃▂▁▃▅▇█▄▂
+inform9 build
+  build loop: running (pid 1129519)
+  status:     ready
+  ...
+```
+
+- **Top line:** while a run is working, a bright block sweeps back and forth with a trail and a spinner turns, and the elapsed time counts up, so you can see at a glance that the display is live. When nothing is running it shows the state instead: a pulsing `●` at a review point, a blinking `✖` when stopped and needing you, `✔` when complete, or a quiet "no build running" with the command to start one.
+- **Second line:** a progress bar with the task count, and a sparkline of the build's activity over the last 20 minutes, one bar per minute, drawn from the steps in the log. A flat line during a run means the model is thinking or waiting; tall bars mean it is reading, editing, and running commands.
+- **The report below:** status, next task, how long the current run has been going, files changed, saved snapshots, recent tasks, and the end of the log.
+- **No Unicode?** On a terminal that is not UTF-8, it uses plain characters (`|/-\`, `#`, `.`).
 
 ```
 claude-build -c blog.conf --watch

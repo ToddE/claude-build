@@ -932,15 +932,89 @@ show_state() {
     echo; echo "follow it live: tail -f $(proj_path "$LOG")"
   fi
 }
-# -s: print the report and exit. --watch: redraw it every few seconds until Ctrl+C.
+# ---------- --watch: an animated header over the status report ----------
+# Activity per minute for the last 20 minutes, as 20 numbers from 0 to 8, counted from the progress lines in the log.
+activity_levels() {
+  [ -f "$LOG" ] || { printf '0 %.0s' $(seq 1 20); return; }
+  tail -n 4000 "$LOG" | awk -v now="$(date +%H:%M)" '
+    BEGIN { split(now, a, ":"); nm = a[1] * 60 + a[2] }
+    /^[0-9][0-9]:[0-9][0-9]:[0-9][0-9] / { split($1, t, ":"); m = t[1] * 60 + t[2]; age = (nm - m + 1440) % 1440; if (age < 20) c[19 - age]++ }
+    END { mx = 1; for (i = 0; i < 20; i++) if (c[i] > mx) mx = c[i]
+          for (i = 0; i < 20; i++) { v = c[i] + 0; k = (v == 0) ? 0 : int(v * 7 / mx) + 1; if (k > 8) k = 8; printf "%d ", k } }'
+}
+# The two animated lines. $1 = tick (0.2 s each). Uses W_* values set when the report was last redrawn.
+watch_header() {
+  local tick="$1" i d pos bar="" ch spin spark="" fill="" lv utf=1 w=28 el
+  local -a sp bl lvls
+  case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in *UTF-8*|*utf8*|*UTF8*) ;; *) utf=0 ;; esac
+  if [ $utf -eq 1 ]; then sp=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏); bl=(▁ ▂ ▃ ▄ ▅ ▆ ▇ █); else sp=('|' '/' '-' '\'); bl=(. : - = + '*' '#' '#'); fi
+  # line 1: what the build is doing
+  if [ "$W_RUN" = 1 ]; then
+    pos=$(( tick % (2 * (w - 1)) )); [ $pos -ge $w ] && pos=$(( 2 * (w - 1) - pos ))
+    for ((i = 0; i < w; i++)); do
+      d=$(( i > pos ? i - pos : pos - i ))
+      if [ $utf -eq 1 ]; then case $d in 0) ch='█' ;; 1) ch='▓' ;; 2) ch='▒' ;; 3) ch='░' ;; *) ch='·' ;; esac
+      else case $d in 0) ch='#' ;; 1) ch='=' ;; 2) ch='-' ;; *) ch='.' ;; esac; fi
+      bar+="$ch"
+    done
+    el=$(( $(date +%s) - W_START ))
+    echo "${C_G}${sp[tick % ${#sp[@]}]}${C_N} ${C_G}${bar}${C_N}  ${C_B}working${C_N} on task ${W_TASK} (${W_MODEL}) $(( el/60 ))m$(printf '%02d' $(( el%60 )))s"
+  else
+    case "$W_STATUS" in
+      gate)    echo "${C_Y}$([ $(( tick / 4 % 2 )) -eq 0 ] && echo '●' || echo '○') paused at a review point${C_N}  (run: $(self_cmd) --ready)" ;;
+      blocked) echo "${C_R}$([ $(( tick / 4 % 2 )) -eq 0 ] && echo '✖' || echo ' ') stopped, needs you${C_N}  (see the report: $LOG_DIR/report-latest.md)" ;;
+      done)    echo "${C_G}✔ build complete${C_N}" ;;
+      *)       echo "${C_D}${sp[tick / 3 % ${#sp[@]}]} no build running (STATUS: ${W_STATUS:-unknown}). Start one: $(self_cmd) -rv${C_N}" ;;
+    esac
+  fi
+  # line 2: progress bar and recent activity
+  local pct=0 filled barw=20; [ "${W_TOTAL:-0}" -gt 0 ] && pct=$(( W_DONE * 100 / W_TOTAL )); filled=$(( pct * barw / 100 ))
+  for ((i = 0; i < barw; i++)); do if [ $i -lt $filled ]; then fill+="$([ $utf -eq 1 ] && echo '█' || echo '#')"; else fill+="$([ $utf -eq 1 ] && echo '░' || echo '.')"; fi; done
+  read -ra lvls <<< "$W_LEVELS"; for lv in "${lvls[@]}"; do if [ "$lv" -eq 0 ]; then spark+="${C_D}${bl[0]}${C_N}"; else spark+="${bl[lv-1]}"; fi; done
+  echo "${C_C}${fill}${C_N} ${W_DONE}/${W_TOTAL} (${pct}%)  activity ${C_G}${spark}${C_N}"
+}
+watch_values() {   # refresh the values the header uses
+  local cs cn cm ce
+  W_STATUS="$(state STATUS)"; read -r W_DONE W_TOTAL <<< "$(task_counts)"; W_LEVELS="$(activity_levels)"
+  W_RUN=0; if [ -f "$CURRENT" ] && alive "$LOCK" claude-build; then IFS='|' read -r cs cn cm ce < "$CURRENT"; W_RUN=1; W_START=$cs; W_TASK=$cn; W_MODEL=$cm; fi
+}
+
+# -s: print the report and exit. --watch: animated header, with the report redrawn every WATCH_EVERY seconds, until Ctrl+C.
 if [ $VIEW -eq 1 ]; then
   if [ $WATCH -eq 1 ]; then
     [ -t 1 ] || { echo "--watch needs a terminal."; exit 64; }
     trap 'printf "\033[?25h\n"; exit 0' INT TERM; printf '\033[?25l\033[2J'
+    W_RUN=0; W_START=0; W_TASK=""; W_MODEL=""; W_STATUS=""; W_DONE=0; W_TOTAL=0; W_LEVELS="0"
+    tick=0; every=$(( ${WATCH_EVERY:-5} * 5 )); [ $every -lt 5 ] && every=5; was_running=0
     while true; do
-      printf '\033[H'; show_state; echo; echo "updated $(date '+%H:%M:%S'), every ${WATCH_EVERY:-5}s. Ctrl+C to quit"; printf '\033[J'
-      sleep "${WATCH_EVERY:-5}"
+      # Leave when the build is not running (it finished, hit a gate, was blocked, or was stopped with -k). Checked once a second.
+      if [ $(( tick % 5 )) -eq 0 ]; then
+        if alive "$LOCK" claude-build; then was_running=1; else break; fi
+      fi
+      if [ $(( tick % every )) -eq 0 ]; then
+        watch_values
+        printf '\033[H'; watch_header "$tick"; echo; show_state; echo; echo "updated $(date '+%H:%M:%S'), report refreshes every ${WATCH_EVERY:-5}s. Ctrl+C to quit"; printf '\033[J'
+      else
+        printf '\033[1;1H'; watch_header "$tick" | sed 's/$/\x1b[K/'
+      fi
+      sleep 0.2; tick=$((tick+1))
     done
+    # The build is not running (or never was). Leave a final, still picture and return to the shell.
+    watch_values; W_RUN=0
+    printf '\033[H\033[2J'; watch_header "$tick"; echo; show_state; echo
+    if [ $was_running -eq 1 ]; then
+      echo "${C_B}The build has stopped.${C_N} How it ended:"
+      grep -E '^20[0-9]{2}-' "$LOG" 2>/dev/null | tail -n 4 | sed -E 's/^[^ ]+ /  /' | cut -c1-150
+      case "$W_STATUS" in
+        gate)    echo; echo "It is waiting for your review. When you have done it: $(self_cmd) --ready, then $(self_cmd) -rv" ;;
+        blocked) echo; echo "It needs you. The report: $(proj_path "$LOG_DIR/report-latest.md")" ;;
+        done)    echo; echo "The build is complete." ;;
+        *)       echo; echo "To start it again: $(self_cmd) -rv" ;;
+      esac
+    else
+      echo "No build is running, so there is nothing to watch. Start one: $(self_cmd) -rv   (or -b, then --watch)"
+    fi
+    printf '\033[?25h'; exit 0
   fi
   show_state; exit 0
 fi
