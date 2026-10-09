@@ -316,7 +316,12 @@ fi
 # Flags that do not make sense together are an error.
 if [ $(( RUN + BACKGROUND + ONCE )) -gt 1 ]; then echo "Choose one of -r (run here), -b (run in the background), or -o (one cycle)."; exit 64; fi
 if [ $STOPIT -eq 1 ] && [ $(( RUN + BACKGROUND + ONCE + VIEW )) -gt 0 ]; then echo "-k and --kill-now (stop) cannot be combined with -r, -b, -o, or -s."; exit 64; fi
-if [ $VIEW -eq 1 ] && [ $(( RUN + BACKGROUND + ONCE )) -gt 0 ]; then echo "-s (status) cannot be combined with -r, -b, or -o. Add -v to a run flag to see the state before it starts."; exit 64; fi
+RUNWATCH=0; [ $WATCH -eq 1 ] && [ $RUN -eq 1 ] && [ $(( BACKGROUND + ONCE )) -eq 0 ] && RUNWATCH=1   # -r --watch: run the build here and watch it
+if [ $VIEW -eq 1 ] && [ $RUNWATCH -eq 0 ] && [ $(( RUN + BACKGROUND + ONCE )) -gt 0 ]; then
+  if [ $WATCH -eq 1 ]; then echo "--watch can go with -r (run here and watch). With -b or -o, start the build first, then run: $NAME --watch"
+  else echo "-s (status) cannot be combined with -r, -b, or -o. Add -v to a run flag to see the state before it starts."; fi
+  exit 64
+fi
 
 if [ $GUIDE -eq 1 ] && [ $(( INIT + RUN + BACKGROUND + ONCE + VIEW + STOPIT )) -gt 0 ]; then echo "--guide stands alone. It only helps you choose flags (add -c, -d, -m if needed)."; exit 64; fi
 if [ $INIT -eq 1 ] && [ $(( BACKGROUND + ONCE + VIEW + STOPIT )) -gt 0 ]; then echo "--init cannot be combined with -b, -o, -s, or -k. Use --init alone to preview, or --init -r to write the state file."; exit 64; fi
@@ -372,6 +377,15 @@ self_cmd() { local c="$SCRIPT_PATH"; [ "$(readlink -f "$(command -v "$NAME" 2>/d
 # Is the process in pid file $1 running AND really ours? $2 is text its command line must contain.
 # Checking the command line stops a reused pid (after a reboot or crash) from being mistaken for ours or signalled by -k.
 alive() { local pid; [ -f "$1" ] && pid=$(cat "$1") && [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q -- "$2"; }
+
+# Removes a leftover stop request. Called only by the flags that start a run (-r, -b, -o), so nothing else touches the file.
+# If a loop is running now, the request is for that loop, so it is left alone (a second copy exits as "already running").
+clear_stop() {
+  [ -f "$STOP" ] && ! alive "$LOCK" claude-build || return 0
+  log_msg "removed an old stop request from $(date -r "$STOP" '+%H:%M' 2>/dev/null) (left over from an earlier stop), so this run is not stopped by it"
+  rm -f "$STOP"
+}
+[ $(( RUN + BACKGROUND + ONCE )) -gt 0 ] && clear_stop
 
 # The task table is split on "|", so a literal | inside a cell must be written \| . This reads the table with \| turned into a placeholder (\001); show_cell turns it back.
 state_table() { sed 's/\\|/\x01/g' "$STATE_FILE"; }
@@ -983,13 +997,27 @@ watch_values() {   # refresh the values the header uses
 if [ $VIEW -eq 1 ]; then
   if [ $WATCH -eq 1 ]; then
     [ -t 1 ] || { echo "--watch needs a terminal."; exit 64; }
-    trap 'printf "\033[?25h\n"; exit 0' INT TERM; printf '\033[?25l\033[2J'
+    CHILD=""; INTS=0; runlog=""
+    if [ $RUNWATCH -eq 1 ]; then
+      if alive "$LOCK" claude-build; then echo "A build is already running for this project (pid $(cat "$LOCK")). Watch it with: $(self_cmd) --watch"; exit 0; fi
+      mkdir -p "$LOG_DIR"; runlog="$(proj_path "$LOG_DIR")/watch-run.log"
+      wpass=(); for a in "${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}"; do case "$a" in --watch|-v|-V|--verbose|--very-verbose|-r|--run) ;; *) wpass+=("$a") ;; esac; done
+      ( cd "$ORIG_PWD" && exec "$SCRIPT_PATH" "${wpass[@]+"${wpass[@]}"}" -r ) > "$runlog" 2>&1 < /dev/null &
+      CHILD=$!
+      # Ctrl+C once: stop after the task in progress. Twice: stop now. The build runs as a child of this window.
+      trap 'INTS=$((INTS+1)); if [ $INTS -eq 1 ]; then touch "$STOP"; else kill_tree TERM "$CHILD"; fi' INT
+      trap 'kill_tree TERM "$CHILD"; printf "\033[?25h\n"; exit 0' TERM
+    else
+      trap 'printf "\033[?25h\n"; exit 0' INT TERM
+    fi
+    printf '\033[?25l\033[2J'
     W_RUN=0; W_START=0; W_TASK=""; W_MODEL=""; W_STATUS=""; W_DONE=0; W_TOTAL=0; W_LEVELS="0"
     tick=0; every=$(( ${WATCH_EVERY:-5} * 5 )); [ $every -lt 5 ] && every=5; was_running=0; miss=0; watch_start=$(date +%s)
     while true; do
       # Once a second: is a build running? Before one has been seen, wait up to WATCH_WAIT seconds (default 30) for it to start.
       # After one has been seen, leave when it is gone for two checks in a row (it finished, hit a gate, was blocked, or was stopped with -k).
       if [ $(( tick % 5 )) -eq 0 ]; then
+        if [ -n "$CHILD" ] && ! kill -0 "$CHILD" 2>/dev/null; then break; fi   # the build we started has ended
         if alive "$LOCK" claude-build; then was_running=1; miss=0
         else
           miss=$((miss+1))
@@ -999,17 +1027,27 @@ if [ $VIEW -eq 1 ]; then
       fi
       if [ $(( tick % every )) -eq 0 ]; then
         watch_values
-        printf '\033[H'; watch_header "$tick"; echo; show_state; echo; echo "updated $(date '+%H:%M:%S'), report refreshes every ${WATCH_EVERY:-5}s. Ctrl+C to quit"; [ $was_running -eq 0 ] && [ "$W_RUN" = 0 ] && echo "${C_D}Waiting up to ${WATCH_WAIT:-30}s for a build to start...${C_N}"; printf '\033[J'
+        printf '\033[H'; watch_header "$tick"; echo; show_state; echo; echo "updated $(date '+%H:%M:%S'), report refreshes every ${WATCH_EVERY:-5}s. Ctrl+C to quit"; [ $was_running -eq 0 ] && [ "$W_RUN" = 0 ] && echo "${C_D}Waiting up to ${WATCH_WAIT:-30}s for a build to start...${C_N}"
+        if [ -n "$CHILD" ]; then if [ $INTS -ge 1 ]; then echo "${C_Y}Stopping: the build ends after the task it is on. Press Ctrl+C again to stop now.${C_N}"; else echo "${C_D}This window is running the build. Ctrl+C stops it after the current task; twice stops it now.${C_N}"; fi; fi; printf '\033[J'
       else
         printf '\033[1;1H'; watch_header "$tick" | sed 's/$/\x1b[K/'
       fi
       sleep 0.2; tick=$((tick+1))
     done
+    if [ -n "$CHILD" ]; then   # give the build a moment to finish writing its report
+      for _ in $(seq 1 40); do kill -0 "$CHILD" 2>/dev/null || break; sleep 0.25; done
+      kill -0 "$CHILD" 2>/dev/null && kill_tree KILL "$CHILD"
+      wait "$CHILD" 2>/dev/null
+    fi
     # The build is not running (or never was). Leave a final, still picture and return to the shell.
     watch_values; W_RUN=0
     printf '\033[H\033[2J'; watch_header "$tick"; echo
     if [ $was_running -eq 1 ]; then show_state; else show_state nolog; fi; echo
-    if [ $was_running -eq 1 ]; then
+    if [ -n "$CHILD" ]; then
+      # The build was started by this window. Its own summary (what happened and what to do next) is in its output file.
+      if grep -q '^== ' "$runlog" 2>/dev/null; then sed -n '/^== /,$p' "$runlog" | grep -v '^\[[0-9:]*\] stopped$'
+      else echo "${C_B}The build ended without a summary.${C_N} Its output:"; tail -n 15 "$runlog" 2>/dev/null | sed 's/^/  /'; fi
+    elif [ $was_running -eq 1 ]; then
       echo "${C_B}The build has stopped.${C_N} How it ended:"
       grep -E '^20[0-9]{2}-' "$LOG" 2>/dev/null | tail -n 4 | sed -E 's/^[^ ]+ /  /' | cut -c1-150
       case "$W_STATUS" in
@@ -1054,7 +1092,7 @@ if [ $BACKGROUND -eq 1 ]; then
   if alive "$LOCK" claude-build; then echo "Already running (pid $(cat "$LOCK")). Stop it with -k, or look at it with -s."; exit 0; fi
   if [ $VERBOSE -ge 1 ]; then show_state nolog; echo; fi
   pass=(); for a in "${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}"; do case "$a" in -b|--background|-v|--view) ;; *) pass+=("$a") ;; esac; done
-  setsid -f "$SCRIPT_PATH" "${pass[@]+"${pass[@]}"}" -r >> "$LOG_DIR/supervisor.log" 2>&1 < /dev/null
+  ( cd "$ORIG_PWD" && exec setsid -f "$SCRIPT_PATH" "${pass[@]+"${pass[@]}"}" -r >> "$(proj_path "$LOG_DIR")/supervisor.log" 2>&1 < /dev/null )
   sleep 2
   if alive "$LOCK" claude-build; then
     echo "Started in the background (pid $(cat "$LOCK")) for $PROJECT_NAME in $(pwd)"
@@ -1074,8 +1112,6 @@ echo $$ > "$LOCK"
 cleanup() { stop_spinner; stop_snapshotter; [ -f "$CURRENT" ] && rescue_work "the build was interrupted"; rm -f "$LOCK" "$CURRENT"; log_msg "stopped"; }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
-STALE_STOP=""; [ -f "$STOP" ] && STALE_STOP="$(date -r "$STOP" '+%H:%M' 2>/dev/null)"
-rm -f "$STOP"
 # Claude -p ends a session after 600 s if a background helper is still running, and kills that helper's work. Wait for it instead;
 # TIMEOUT still ends a run that never finishes. BG_WAIT_CEILING_MS in the config overrides this (a number of milliseconds).
 export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="${BG_WAIT_CEILING_MS:-0}"
@@ -1194,7 +1230,6 @@ resume_build() {
 
 log_msg "started ($PROJECT_NAME in $(pwd)). Checking every $(( INTERVAL/60 )) min. See progress: tail -f $(proj_path "$LOG")   or   $(self_cmd) -s"
 log_msg "stop with Ctrl+C, $(self_cmd) -k, or: touch $(proj_path "$STOP")"
-[ -n "$STALE_STOP" ] && log_msg "ignored an old stop request from $STALE_STOP (left over from an earlier stop). Running now"
 NO_PROGRESS=0
 while true; do
   [ -f "$STOP" ] && { log_msg "stop requested at $(date -r "$STOP" '+%H:%M' 2>/dev/null) (the stop file was found), so stopping"; exit 0; }
