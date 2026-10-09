@@ -985,15 +985,21 @@ if [ $VIEW -eq 1 ]; then
     [ -t 1 ] || { echo "--watch needs a terminal."; exit 64; }
     trap 'printf "\033[?25h\n"; exit 0' INT TERM; printf '\033[?25l\033[2J'
     W_RUN=0; W_START=0; W_TASK=""; W_MODEL=""; W_STATUS=""; W_DONE=0; W_TOTAL=0; W_LEVELS="0"
-    tick=0; every=$(( ${WATCH_EVERY:-5} * 5 )); [ $every -lt 5 ] && every=5; was_running=0
+    tick=0; every=$(( ${WATCH_EVERY:-5} * 5 )); [ $every -lt 5 ] && every=5; was_running=0; miss=0; watch_start=$(date +%s)
     while true; do
-      # Leave when the build is not running (it finished, hit a gate, was blocked, or was stopped with -k). Checked once a second.
+      # Once a second: is a build running? Before one has been seen, wait up to WATCH_WAIT seconds (default 30) for it to start.
+      # After one has been seen, leave when it is gone for two checks in a row (it finished, hit a gate, was blocked, or was stopped with -k).
       if [ $(( tick % 5 )) -eq 0 ]; then
-        if alive "$LOCK" claude-build; then was_running=1; else break; fi
+        if alive "$LOCK" claude-build; then was_running=1; miss=0
+        else
+          miss=$((miss+1))
+          if [ $was_running -eq 1 ]; then [ $miss -ge 2 ] && break
+          elif [ $(( $(date +%s) - watch_start )) -ge "${WATCH_WAIT:-30}" ]; then break; fi
+        fi
       fi
       if [ $(( tick % every )) -eq 0 ]; then
         watch_values
-        printf '\033[H'; watch_header "$tick"; echo; show_state; echo; echo "updated $(date '+%H:%M:%S'), report refreshes every ${WATCH_EVERY:-5}s. Ctrl+C to quit"; printf '\033[J'
+        printf '\033[H'; watch_header "$tick"; echo; show_state; echo; echo "updated $(date '+%H:%M:%S'), report refreshes every ${WATCH_EVERY:-5}s. Ctrl+C to quit"; [ $was_running -eq 0 ] && [ "$W_RUN" = 0 ] && echo "${C_D}Waiting up to ${WATCH_WAIT:-30}s for a build to start...${C_N}"; printf '\033[J'
       else
         printf '\033[1;1H'; watch_header "$tick" | sed 's/$/\x1b[K/'
       fi
@@ -1001,7 +1007,8 @@ if [ $VIEW -eq 1 ]; then
     done
     # The build is not running (or never was). Leave a final, still picture and return to the shell.
     watch_values; W_RUN=0
-    printf '\033[H\033[2J'; watch_header "$tick"; echo; show_state; echo
+    printf '\033[H\033[2J'; watch_header "$tick"; echo
+    if [ $was_running -eq 1 ]; then show_state; else show_state nolog; fi; echo
     if [ $was_running -eq 1 ]; then
       echo "${C_B}The build has stopped.${C_N} How it ended:"
       grep -E '^20[0-9]{2}-' "$LOG" 2>/dev/null | tail -n 4 | sed -E 's/^[^ ]+ /  /' | cut -c1-150
@@ -1012,7 +1019,9 @@ if [ $VIEW -eq 1 ]; then
         *)       echo; echo "To start it again: $(self_cmd) -rv" ;;
       esac
     else
-      echo "No build is running, so there is nothing to watch. Start one: $(self_cmd) -rv   (or -b, then --watch)"
+      echo "No build started while the watch waited (${WATCH_WAIT:-30}s), so there was nothing to watch. The log above is from before; it does not describe this moment."
+      [ -f "$STOP" ] && echo "A stop request from $(date -r "$STOP" '+%H:%M' 2>/dev/null) is still in $(proj_path "$STOP"). Starting a build removes it."
+      echo "Start one: $(self_cmd) -rv   (or -b, then --watch)"
     fi
     printf '\033[?25h'; exit 0
   fi
@@ -1065,7 +1074,11 @@ echo $$ > "$LOCK"
 cleanup() { stop_spinner; stop_snapshotter; [ -f "$CURRENT" ] && rescue_work "the build was interrupted"; rm -f "$LOCK" "$CURRENT"; log_msg "stopped"; }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
+STALE_STOP=""; [ -f "$STOP" ] && STALE_STOP="$(date -r "$STOP" '+%H:%M' 2>/dev/null)"
 rm -f "$STOP"
+# Claude -p ends a session after 600 s if a background helper is still running, and kills that helper's work. Wait for it instead;
+# TIMEOUT still ends a run that never finishes. BG_WAIT_CEILING_MS in the config overrides this (a number of milliseconds).
+export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="${BG_WAIT_CEILING_MS:-0}"
 
 # A small animated line so a quiet foreground run does not look frozen: frame, task, model, time, and changed files.
 # Drawn on stderr only, only on a terminal. Stopped and erased when the run ends.
@@ -1181,9 +1194,10 @@ resume_build() {
 
 log_msg "started ($PROJECT_NAME in $(pwd)). Checking every $(( INTERVAL/60 )) min. See progress: tail -f $(proj_path "$LOG")   or   $(self_cmd) -s"
 log_msg "stop with Ctrl+C, $(self_cmd) -k, or: touch $(proj_path "$STOP")"
+[ -n "$STALE_STOP" ] && log_msg "ignored an old stop request from $STALE_STOP (left over from an earlier stop). Running now"
 NO_PROGRESS=0
 while true; do
-  [ -f "$STOP" ] && { log_msg "stop file found"; exit 0; }
+  [ -f "$STOP" ] && { log_msg "stop requested at $(date -r "$STOP" '+%H:%M' 2>/dev/null) (the stop file was found), so stopping"; exit 0; }
   status=$(state STATUS); next=$(state NEXT); read -r done_n total <<< "$(task_counts)"
   case "$status" in
     done)    log_msg "build complete ($done_n/$total tasks)"; finish_build done; exit 0 ;;
