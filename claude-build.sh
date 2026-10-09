@@ -9,7 +9,7 @@
 # Author: Todd Emerson (github: ToddE) with coding assistance from Claude Code Sonnet 5.5
 # see https://github.com/ToddE/claude-build/README.md for more information.
 set -u
-VERSION="1.2.4"
+VERSION="1.2.5"
 
 # Where the script lives (symlinks followed) and where the command was typed.
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
