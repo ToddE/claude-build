@@ -46,6 +46,11 @@ AFTER_RUN=30           # seconds to wait after a good run
 BACKOFF_STEPS=(3600 7200 14400 21600)   # waits after the 1st, 2nd, 3rd, 4th and later failures
 LOG_DIR=".build"
 REQUIRE_GIT=1
+GATE_CHECKS=()         # commands the script runs itself at each gate and at the end, e.g. ("npm test" "npm run lint"). Empty = none
+GATE_FIX_TRIES=2       # when a check fails: fix sessions to try before the build stops as blocked
+FIX_MODELS=("sonnet" "opus")   # model for each fix attempt, in order. The last one repeats
+CHECK_TIMEOUT="30m"    # longest one check command may run
+TEST_GLOBS=("test/*" "tests/*" "*/test/*" "*/tests/*" "*__tests__*" "*.test.*" "*.spec.*" "*_test.*" "test_*")   # paths counted as tests
 GATE_MODE="stop"       # stop = a GATE row pauses the build. continue = record it for review and keep going (a GATE! row always stops)
 REPORT=1               # 1 = at every stop, write a report file and have a model explain it in plain words. 0 = report without the explanation
 REPORT_MODEL="sonnet"  # model that writes the plain-words explanation (one short call per stop)
@@ -465,6 +470,9 @@ build_prompt() {
   p="${p//\{state_file\}/$STATE_FILE}"; p="${p//\{tasks_per_run\}/$TASKS_PER_RUN}"; p="${p//\{context\}/$ctx}"
   # Always added: tells the model how to end a run at a gate or a stop, so the person knows what to do.
   p="$p When you stop at a gate or a stop condition, write the Notes cell of that row and your final message for a person who has not read the planning files. Spell out any code name (a milestone id, a gate id, a spike) in a few plain words. Say what was built, what you want checked, the full path of each file to open, what a correct result looks like, and what to do if it is wrong. The exact edit that continues the build is in ${STATE_FILE}: change STATUS: gate to STATUS: ready. Do not end with a recommendation alone."
+  # Tests before review points, so a gate can be checked by commands as well as by a person.
+  p="$p Before you mark a GATE row done, make sure automated tests cover the work of that milestone: add any that are missing and run them. In that row's Notes, list what a person still needs to check by hand."
+  [ ${#GATE_CHECKS[@]} -gt 0 ] && p="$p At each GATE row and at the end of the build, claude-build runs these checks itself and fixes failures before it continues: ${GATE_CHECKS[*]}. Keep them passing."
   # A person can ask the build to stop with -k or by creating this file. The loop only looks between runs, and a run can hold several tasks, so the model checks too.
   p="$p Before you start each task after the first in this run, check whether the file ${LOG_DIR}/stop exists (use ls, or Read). If it exists, finish and commit the task you are on, then stop. Do not start another task."
   # Files left by a run that was stopped or failed: tell the next session so it neither ignores nor throws them away.
@@ -716,7 +724,7 @@ hard_gate_now() { local id task; IFS='|' read -r id task <<< "$(recent_done 1)";
 # GATE_MODE=continue: note the gate for later review, clear it, and let the build go on.
 soft_gate_pass() {
   local id task notes; IFS='|' read -r id task <<< "$(recent_done 1)"; notes="$(task_cell "$id" Notes)"
-  mkdir -p "$LOG_DIR"; printf '%s\t%s\t%s\t%s\n' "$(date '+%Y-%m-%d %H:%M')" "$id" "$task" "$notes" >> "$LOG_DIR/review-items.tsv"
+  mkdir -p "$LOG_DIR"; printf '%s\t%s\t%s\t%s\t%s\n' "$(date '+%Y-%m-%d %H:%M')" "$id" "$task" "$notes" "${CHECK_RESULT:-no automated checks}" >> "$LOG_DIR/review-items.tsv"
   sed -i 's|^STATUS:.*|STATUS: ready|' "$STATE_FILE"
   log_msg "passed gate ${id} without stopping (GATE_MODE=continue). It is recorded for review in the report"
 }
@@ -755,6 +763,7 @@ Write exactly these parts, as short Markdown, under 250 words in all:
 FACTS
 - Result: $(report_sentence "$1")
 - Blocked reason: $(state BLOCKED_REASON)
+- Automated checks: ${CHECK_RESULT:-none run}${CHECK_TESTS_CHANGED:+ (test files changed while fixing: $CHECK_TESTS_CHANGED)}
 - Latest finished task: ${id} ${task}
 - Notes on that task: ${notes}
 - Most recent finished tasks: $(recent_done 8 | tr '\n' ';')
@@ -813,7 +822,17 @@ finish_build() {
     if [ -s "$LOG_DIR/review-items.tsv" ]; then
       echo; echo "## Review points the build passed without stopping"; echo
       echo "These were marked as review points. The build recorded them and kept going (GATE_MODE=continue). Check them when you can."; echo
-      while IFS=$'\t' read -r when rid rtask rnotes; do echo "- **$rid** ($when): $rtask${rnotes:+ Notes: $rnotes}"; done < "$LOG_DIR/review-items.tsv"
+      while IFS=$'\t' read -r when rid rtask rnotes rcheck; do echo "- **$rid** ($when): $rtask${rnotes:+ Notes: $rnotes}${rcheck:+ Automated checks: $rcheck.}"; done < "$LOG_DIR/review-items.tsv"
+    fi
+    if [ ${#GATE_CHECKS[@]} -gt 0 ]; then
+      echo; echo "## Automated checks"; echo
+      echo "- Commands: \`${GATE_CHECKS[*]}\`"
+      echo "- Result at this stop: ${CHECK_RESULT:-not run at this stop}"
+      if [ -s "$LOG_DIR/tests-changed.tsv" ]; then
+        echo "- Test files that fix sessions changed. Review them, since a fix can make a check pass by weakening a test:"
+        while IFS=$'\t' read -r when where files; do echo "  - at $where ($when): $files"; done < "$LOG_DIR/tests-changed.tsv"
+      fi
+      echo "- Output of the last check run: \`$(proj_path "$LOG_DIR/checks-last.txt")\`"
     fi
     if [ -n "$(problem_rows)" ]; then
       echo; echo "## Tasks that had trouble"; echo
@@ -1253,6 +1272,86 @@ progress_lines() {
 }
 
 # One bounded model run. Returns 0 if it finished, 1 if the build cannot start, anything else if it failed.
+# ---------- automated checks at gates and at the end ----------
+# The script runs GATE_CHECKS itself (no model). On a failure it starts a fix session with the failing command and its
+# output, then runs the checks again, up to GATE_FIX_TRIES times. Test files changed during fixes are listed for review,
+# because a fix can make a check pass by weakening a test.
+CHECK_RESULT=""; CHECK_TESTS_CHANGED=""; FAILED_CHECK=""
+run_checks() {   # 0 = all passed. Output goes to LOG_DIR/checks-last.txt
+  local c out="$LOG_DIR/checks-last.txt"; FAILED_CHECK=""
+  mkdir -p "$LOG_DIR"; : > "$out"
+  for c in "${GATE_CHECKS[@]}"; do
+    printf '$ %s\n' "$c" >> "$out"
+    if ! timeout --foreground "${CHECK_TIMEOUT:-30m}" bash -c "$c" >> "$out" 2>&1 < /dev/null; then
+      FAILED_CHECK="$c"; printf '[this command failed]\n' >> "$out"; return 1
+    fi
+  done
+  return 0
+}
+tests_changed_since() {   # test files that differ from commit $1, committed or not
+  local f g
+  git diff --name-only "$1" 2>/dev/null | sort -u | while IFS= read -r f; do
+    for g in "${TEST_GLOBS[@]+"${TEST_GLOBS[@]}"}"; do case "$f" in $g) echo "$f"; break ;; esac; done
+  done
+}
+set_blocked() {   # $1 = reason
+  local r="$1"; r=${r//\\/\\\\}; r=${r//&/\\&}; r=${r//|/\\|}
+  sed -i "s|^STATUS:.*|STATUS: blocked|; s|^BLOCKED_REASON:.*|BLOCKED_REASON: $r|" "$STATE_FILE"
+}
+fix_session() {   # $1 = where, $2 = model, $3 = attempt number
+  local model="$2" effort="" kv code out prompt
+  for kv in "${EFFORT_DEFAULTS[@]+"${EFFORT_DEFAULTS[@]}"}"; do [ "${kv%%=*}" = "$model" ] && effort="${kv#*=}"; done
+  out="$(tail -n 150 "$LOG_DIR/checks-last.txt" 2>/dev/null)"
+  prompt="The automated checks for this project failed at ${1}. This command failed: ${FAILED_CHECK}
+Its output is below. Find the cause and fix it so the checks pass, then run the failing command yourself to confirm. Do not delete, skip, or weaken a test or a check to make it pass. If a test itself is wrong, fix the test and say why in the commit message. Commit your fix with a message that starts with \"Fix checks:\". Do not change ${STATE_FILE}, except to add a short note to the Notes cell of the latest finished task. This is fix attempt ${3}.
+
+OUTPUT
+${out}"
+  local -a cmd=(-p "$prompt" --model "$model" --permission-mode "$PERMISSION_MODE")
+  [ -n "$effort" ] && cmd+=(--effort "$effort")
+  [ ${#ALLOWED_TOOLS[@]} -gt 0 ] && cmd+=(--allowedTools "${ALLOWED_TOOLS[@]}")
+  [ ${#EXTRA_CLAUDE_ARGS[@]} -gt 0 ] && cmd+=("${EXTRA_CLAUDE_ARGS[@]}")
+  echo "$(date +%s)|fix $3|$model|${effort:-default}" > "$CURRENT"
+  if [ "${SNAPSHOT_EVERY:-0}" -gt 0 ] && [ -d .git ]; then snapshotter & SNAP_PID=$!; fi
+  if [ "$STREAM" -eq 1 ] && command -v jq >/dev/null 2>&1; then
+    cmd+=(--output-format stream-json --verbose)
+    if [ $VERBOSE -ge 1 ]; then
+      timeout --foreground "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" 2>&1 | tee "$LOG_DIR/last-run.jsonl" | progress_lines | tee -a "$LOG" | tool_mark | style_lines | tool_ticker; code=${PIPESTATUS[0]}
+    else
+      timeout --foreground "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" 2>&1 | tee "$LOG_DIR/last-run.jsonl" | progress_lines >> "$LOG"; code=${PIPESTATUS[0]}
+    fi
+    local c; c="$(jq -Rr 'fromjson? | select(.type=="result") | .total_cost_usd // empty' "$LOG_DIR/last-run.jsonl" 2>/dev/null | tail -n 1)"
+    [ -n "$c" ] && printf '%s %s\n' "$(date +%s)" "$c" >> "$LOG_DIR/costs.tsv"
+  else
+    cmd+=(--output-format text)
+    timeout --foreground "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" >> "$LOG" 2>&1; code=$?
+  fi
+  stop_snapshotter; rm -f "$CURRENT"
+  return $code
+}
+verify_checks() {   # $1 = where. 0 = passed (or no checks set), 1 = still failing after the fix attempts
+  CHECK_RESULT=""; CHECK_TESTS_CHANGED=""
+  [ ${#GATE_CHECKS[@]} -gt 0 ] || return 0
+  local before try=0 tries="${GATE_FIX_TRIES:-2}" model n=${#FIX_MODELS[@]}
+  before="$(git rev-parse HEAD 2>/dev/null)"
+  log_msg "running the automated checks at $1: ${GATE_CHECKS[*]}"
+  if run_checks; then CHECK_RESULT="passed"; log_msg "automated checks passed"; return 0; fi
+  while [ "$try" -lt "$tries" ]; do
+    try=$((try+1)); model="${FIX_MODELS[$(( try-1 < n ? try-1 : n-1 ))]:-sonnet}"
+    log_msg "check failed: $FAILED_CHECK. Fix attempt $try of $tries, on $model"
+    fix_session "$1" "$model" "$try" || log_msg "fix attempt $try ended with an error"
+    if run_checks; then CHECK_RESULT="passed after $try fix attempt(s)"; log_msg "automated checks pass after fix attempt $try"; break; fi
+  done
+  [ -n "$before" ] && CHECK_TESTS_CHANGED="$(tests_changed_since "$before" | tr '\n' ' ')"
+  if [ -n "$CHECK_TESTS_CHANGED" ]; then
+    log_msg "test files changed while fixing (review them): $CHECK_TESTS_CHANGED"
+    printf '%s\t%s\t%s\n' "$(date '+%Y-%m-%d %H:%M')" "$1" "$CHECK_TESTS_CHANGED" >> "$LOG_DIR/tests-changed.tsv"
+  fi
+  [ -n "$CHECK_RESULT" ] && return 0
+  CHECK_RESULT="still failing after $tries fix attempt(s): $FAILED_CHECK"
+  return 1
+}
+
 resume_build() {
   if [ "$REQUIRE_GIT" -eq 1 ] && [ ! -d .git ]; then log_msg "cannot run: run git init first so each task is checkpointed"; return 1; fi
   local -a cmd=(); while IFS= read -r -d '' a; do cmd+=("$a"); done < <(claude_args)
@@ -1298,9 +1397,18 @@ while true; do
   [ -f "$STOP" ] && { log_msg "stop requested at $(date -r "$STOP" '+%H:%M' 2>/dev/null) (the stop file was found), so stopping"; exit 0; }
   status=$(state STATUS); next=$(state NEXT); read -r done_n total <<< "$(task_counts)"
   case "$status" in
-    done)    log_msg "build complete ($done_n/$total tasks)"; finish_build done; exit 0 ;;
+    done)    if ! verify_checks "the end of the build"; then
+               set_blocked "Automated checks still fail at the end of the build: $FAILED_CHECK. Output: $LOG_DIR/checks-last.txt"
+               log_msg "BLOCKED: automated checks fail at the end of the build"; finish_build blocked; exit 2
+             fi
+             log_msg "build complete ($done_n/$total tasks)"; finish_build done; exit 0 ;;
     blocked) log_msg "BLOCKED: $(state BLOCKED_REASON). Fix it, then set STATUS: ready"; finish_build blocked; exit 2 ;;
-    gate)    if [ "$GATE_MODE" = continue ] && ! hard_gate_now; then soft_gate_pass; NO_PROGRESS=0; continue; fi
+    gate)    gid="$(recent_done 1 | cut -d'|' -f1)"
+             if ! verify_checks "gate ${gid:-?}"; then
+               set_blocked "Automated checks still fail at gate ${gid:-?}: $FAILED_CHECK. Output: $LOG_DIR/checks-last.txt"
+               log_msg "BLOCKED: automated checks fail at gate ${gid:-?}"; finish_build blocked; exit 2
+             fi
+             if [ "$GATE_MODE" = continue ] && ! hard_gate_now; then soft_gate_pass; NO_PROGRESS=0; continue; fi
              log_msg "at a gate ($done_n/$total done). Review, then set STATUS: ready"; finish_build gate; exit 3 ;;
     ready)   ;;
     *)       log_msg "unknown STATUS '$status' in $STATE_FILE"; exit 64 ;;

@@ -1,858 +1,584 @@
-# claude-build manual
+# claude-build
 
-Created by A. Todd Emerson. Apache-2.0 license. Contributions welcome (section 15).
+claude-build helps you turn a plan into working software with Claude Code, one approved task at a time. You give it a list of tasks. It asks Claude Code to work through them in order, saves each finished task in git, and stops at the checkpoints you choose so you can look at the work before it goes further.
 
-`claude-build.sh` keeps a Claude Code build going until it is done, blocked, or at a gate. It reads a state file, and while the status is `ready` it starts one bounded `claude -p` session that does the next few tasks, updates the state file, and commits. Then it sleeps and checks again. Sleeping and checking use no model, so an idle or finished build costs almost nothing.
+It runs on your own computer, from the command line, and you can leave it running while you do something else.
 
-Install it with the script in section 1, edit `claude-build.conf` (set `PROJECT_DIR`), and add a state file (section 4). One installed copy can build any number of projects: point it at a project with `-c` and `-d`.
+*Updated 2026-10-09 for version 1.2.6. By A. Todd Emerson. Apache-2.0 license.*
 
-## Who this is for
+---
 
-`claude-build` suits one project with dependent steps that you want Claude Code to work through while you are away. You describe the work once, in a plan and a task table, and the script runs it in order on your branch, one bounded session at a time. It needs bash, git, and the `claude` command, and no scheduler, database, or Python environment.
+**Contents**
 
-It fits when:
+Guide
 
-- You have a plan with many steps, such as a new service, a documentation set, or a migration, and a person reviews the result at milestones.
-- You want to control cost by choosing a model and effort level for each task.
-- You want the build to survive usage limits and crashes without watching it.
+1. [What claude-build does](#what-claude-build-does)
+2. [Words used in this guide](#words-used-in-this-guide)
+3. [Is it a good fit?](#is-it-a-good-fit)
+4. [From an idea to a finished build](#from-an-idea-to-a-finished-build)
+5. [Install](#install)
+6. [Your first build, step by step](#your-first-build-step-by-step)
+7. [Day to day](#day-to-day)
+8. [Review points](#review-points)
+9. [Fixing problems](#fixing-problems)
+10. [Safety and cost](#safety-and-cost)
+11. [Under the hood](#under-the-hood)
+12. [Related projects](#related-projects)
 
-If you have many independent tasks that should each end on their own branch for review, see claude-automation under Related projects.
+Reference
 
-### Where the plan comes from
+13. [Commands](#commands)
+14. [The task list file](#the-task-list-file)
+15. [The settings file](#the-settings-file)
+16. [Finding the settings and the project](#finding-the-settings-and-the-project)
+17. [Files it writes](#files-it-writes)
+18. [Exit codes](#exit-codes)
+19. [Running on a schedule](#running-on-a-schedule)
+20. [Custom prompts](#custom-prompts)
+21. [Testing without spending tokens](#testing-without-spending-tokens)
+22. [Troubleshooting table](#troubleshooting-table)
+23. [License and contributing](#license-and-contributing)
 
-The quality of the build follows the quality of the plan. A build that starts from a clear plan needs fewer retries and less rework. If you do not have one yet, the [claude-skills](https://github.com/ToddE/claude-skills) project is a companion for that step. Its product-management skills take an idea through a Working Backwards PR/FAQ, use case discovery, full use cases, test cases, functional requirements, and an architecture review. Those documents are a good source for a `PLAN.md`.
+---
 
-The full path with claude-skills looks like this:
+# Guide
 
-1. **Plan with claude-skills.** Produce the PR/FAQ, use cases, functional requirements, test cases, and architecture review for your project.
-2. **Run the `build-plan` skill.** It reads those documents, asks what it still needs (stack, check commands, protected areas, credentials, gates), and writes `BUILD_STATE.md`, `claude-build.conf`, `CLAUDE.md`, a build plan, and an engineering prompt.
-3. **Review the table.** Edit models, effort, order, and the gate rows. Resolve any `## Open questions`.
-4. **Preview.** `claude-build -c claude-build.conf -d <project> -v` shows the model, the prompt, and the allowed commands. Nothing starts.
-5. **Build.** `claude-build ... -b` runs it in the background. Check progress with `-s`.
+## What claude-build does
 
-If you have only a short plan, skip step 2 and use `claude-build --init PLAN.md -r` to draft the table (see "Before you start"). Questions the plan leaves open are listed in the file, or asked live with `-I`.
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code) can write and change software for you. A small change fits in one conversation. A whole application does not: the conversation grows too long, your plan's usage limit cuts it off, or a mistake early on goes unnoticed for hours.
 
-[examples/PLAN.md](examples/PLAN.md) shows a plan in a structure that turns into a good table: a goal and scope, conventions, a document map, milestones with tasks that each name what to read, a check that proves they are done and a difficulty, review gates, and open decisions. Its task table is [examples/BUILD_STATE.md](examples/BUILD_STATE.md).
+claude-build breaks the work into short sessions. Before it starts, you approve a task list. Then it:
 
-**claude-build **works with any plan. A short `PLAN.md` you wrote by hand is enough to start.
+1. Reads the task list and finds the next task.
+2. Starts a fresh Claude Code session for that task, using the model you picked for it.
+3. Waits while Claude Code does the task, checks it, and saves it as a git commit.
+4. Marks the task done and moves to the next one.
+5. Stops at each review point you added, and when the list is finished.
 
-## Why claude-build
+If something goes wrong, it stops and writes a short report that tells you, in plain words, what happened and what to do next. If your usage limit runs out, it waits and tries again later. The waiting and checking cost nothing: only the Claude Code sessions use your plan's usage.
 
-Long builds with Claude Code usually fail in the same few ways: the context fills up, a usage limit stops the session, or a task goes wrong and nobody notices until morning. claude-build handles each of these with plain bash and a Markdown state file.
+## Words used in this guide
 
-- **A small fresh context for every run.** Each run is one bounded `claude -p` session that does the next few tasks. A crash or usage limit costs at most one task, and the next run starts clean from the state file and git.
-- **The script chooses the model, and no model orchestrates.** You write the task table, or have one model draft it once with `--init` and edit the result. Each row names a model and an effort level. The script starts each run with those settings, so routine tasks use cheaper models and hard ones use Opus. [examples/BUILD_STATE.md](examples/BUILD_STATE.md) shows a task list set up this way.
-- **Failures are handled for you.** A failed run waits 1, 2, 4, then 6 hours. A task that fails twice is handed to Opus at high effort with a written diagnosis. Two clean runs that finish nothing set the build to `blocked`, with a reason.
-- **Waiting costs nothing.** Sleeping and checking use no model, so an idle or finished build costs almost nothing.
-- **Designed to be left alone.** Unattended runs may use only the commands on an allowed list, with no push, deploy, or delete by default. One copy runs at a time, and every task is a commit you can revert.
-- **Hard to start by accident.** With no flags you get the help. With flags but no run flag you get a preview of the config, the model, and the exact prompt. Only `-r`, `-b`, and `-o` spend tokens.
-- **Stops where a person should decide.** The state file has `ready`, `blocked`, `gate`, and `done`. A `gate` pauses the build for a human decision and shows why.
-- **Easy to inspect.** `-s` shows the last state, recent tasks, and the log tail while the build runs and after it ends.
-- **Small and readable.** It is one bash script with no dependencies beyond standard tools. You can read all of it before you run it.
-
-### Related projects
-
-The idea of calling `claude -p` in a loop with progress kept in files and git is well known as the Ralph Wiggum loop, and several projects build on it. claude-build follows the same pattern and adds the supervision around it: per-task model and effort, backoff, escalation, gates, an allowed-tools list, and a preview mode. Other projects to look at:
-
-- [Ralph Wiggum loop](https://kartit.net/blog/ralph-wiggum-technique.html): the original shell loop, and Anthropic's plugin that runs a similar loop inside one session with a stop hook.
-- [loopgen](https://github.com/pro-vi/loopy): generates the prompt, state, and queue files for a long-running loop.
-- [claude-automation](https://pypi.org/project/claude-automation/): an overnight pipeline with plan, code, review, and test stages, and one git worktree per task.
-- [Orchestra](https://pkg.go.dev/github.com/MochaCosine1206/orchestra): a Go tool that runs `claude -p` rounds with circuit breakers.
-
-## Contents
-
-1. [Quick start](#1-quick-start)
-2. [How it works](#2-how-it-works)
-3. [Flags, one by one](#3-flags-one-by-one)
-4. [The state file](#4-the-state-file)
-5. [The config file](#5-the-config-file)
-6. [Checking progress](#6-checking-progress)
-7. [Everyday tasks](#7-everyday-tasks)
-8. [Running unattended](#8-running-unattended)
-9. [Cost and energy](#9-cost-and-energy)
-10. [Exit codes and files](#10-exit-codes-and-files)
-11. [Testing without spending tokens](#11-testing-without-spending-tokens)
-12. [Troubleshooting](#12-troubleshooting)
-13. [Safety](#13-safety)
-14. [License and credit](#14-license-and-credit)
-15. [Contributing](#15-contributing)
-
-## 1. Quick start
-
-### Before you start: you need a state file
-
-**claude-build** needs a **state file** before it can run: a Markdown file with a status line and a table of tasks (section 4). Without it, the script stops with `state file not found` and starts nothing. A project also needs to be a git repository.
-
-The task table sets the model and effort level for each task. The script reads those cells and starts each run with them. During a build it never asks a model to choose.
-
-The preferred way is the `build-plan` skill from [claude-skills](https://github.com/ToddE/claude-skills) (in `product-management/skills/build-plan`). It takes the use cases, requirements, test cases, and architecture review that the other skills produce and writes `BUILD_STATE.md`, `claude-build.conf`, `CLAUDE.md`, a build plan, and an engineering prompt, with a model and effort for each task, gates, stop conditions, and a coverage check that every requirement has a task. It asks its questions while you can answer them. Use it when you can. The two ways below are for smaller projects or when you do not have those documents.
-
-You have three ways to get a state file:
-
-0. **Use the `build-plan` skill** (preferred, described above).
-1. **Write it yourself.** Copy [examples/BUILD_STATE.md](examples/BUILD_STATE.md) into your project as `BUILD_STATE.md` and replace the rows with your tasks.
-2. **Have a model draft it with `--init`.** Write your plan in any Markdown file (goals, requirements, the order you want things done), then run:
-
-**Preview.** Shows the model, the files it reads, and the prompt. Starts nothing.
-
-```bash
-claude-build -d ~/Workspace/myproject --init PLAN.md -m opus
-```
-
-**Run it.** One `claude -p` session writes `BUILD_STATE.md`.
-
-```bash
-claude-build -d ~/Workspace/myproject --init PLAN.md -m opus -r
-```
-
-**Interactive.** The model asks you questions first.
-
-```bash
-claude-build -d ~/Workspace/myproject --init PLAN.md -m opus -I -r
-```
-
-What `--init` does, step by step:
-
-1. You give it your plan files, either right after `--init` or with `-i` (repeat `-i` more than once). Files and folders both work.
-2. Without `-r` it only previews. It shows the model, the files it would read, and the exact prompt, and starts nothing.
-3. With `-r` it starts one Claude session to write the file.
-4. The session uses the model from `-m`, or `MODEL` in the config. Set the effort with `-e` or `EFFORT`.
-
-The session is told to:
-
-- read your plan files and the project
-- write `BUILD_STATE.md` and nothing else
-- choose a model and effort level for each task, by how hard the task is
-- put tasks that use the same model next to each other
-- add a `GATE` row after each milestone
-- not start any task
-
-It can read and write files. It cannot run commands. Use Opus for a large or tricky plan. Sonnet is enough for a simple one.
-
-**Best results come from a plan that already answers the scope questions.** Do the questioning upstream, with a planning step such as claude-skills (see "Where the plan comes from"), so that `--init` only has to write the table. The script prints this reminder whenever you use `--init`. Where the plan leaves something unclear, there are two behaviors:
-
-| Mode | What happens |
+| Word | Meaning here |
 | --- | --- |
-| Default (`--init -r`) | No one is available to answer, so the model writes its best draft and lists each unclear point under `## Open questions` after the table, with the assumption it made. If it has any, it sets `STATUS: blocked` and the script tells you how many. Answer them by editing the table or the plan, then set `STATUS: ready`. Runs unattended |
-| Interactive (`--init -I -r`) | Starts a normal `claude` session in your terminal. The model reads the plan, asks you what is unclear one question at a time, then writes the file. Needs a terminal, so it cannot run from cron or the background |
+| Claude Code | Anthropic's command-line tool that lets Claude read, write, and run code in a folder on your computer. The command is `claude` |
+| Session or run | One Claude Code conversation started by claude-build. A run does one or more tasks, then ends |
+| Task list, or state file | A Markdown file, usually `BUILD_STATE.md`, with a table of tasks and a few status lines at the top. It is the build's memory |
+| Model | The Claude model a task uses. `haiku` is fast and low-cost, `sonnet` handles most work, and `opus` is the strongest |
+| Effort | The amount of thinking the model does before it acts: `low`, `medium`, `high`, `xhigh`, or `max` |
+| Review point, or gate | A row in the task list that pauses the build so you can look at the work |
+| Tokens | The units of text that Claude reads and writes. Your Claude plan or API account limits or bills them |
+| Git and commit | Git keeps the history of a project's files. A commit is one saved step in that history, and you can return to any commit |
+| Terminal | The command-line window where you type commands |
+| Config, or settings file | `claude-build.conf`, a short text file with your project's settings |
 
-The script then checks that the file has `STATUS: ready` (or `blocked` with open questions), a `NEXT` id, and a task table with `Id` and `Status` columns, and prints the task count. It refuses to run if the state file already exists, so it never overwrites your work.
+## Is it a good fit?
 
-**Read and edit the result before you run the build.** The table drives every run, and a vague task wastes a session.
+claude-build suits a project with many steps that depend on each other, such as a new web service, a set of documents, or a move from one system to another. It works best when:
 
-### Stuck?
+- you can describe the work as a list of tasks, each small enough for one session
+- you want to choose which model, and how much thinking, each task gets
+- you want the build to keep going through usage limits and crashes without you watching it
+- you want to review the work at milestones you choose
 
-Run `claude-build --guide`. It opens an interactive Claude session that checks your setup (bash version, missing tools, config, project folder, state file, the end of the log), asks what you want to do, and gives you the exact commands, previews first. It cannot run claude-build for you, and it can only read files.
+It suits one project at a time, worked in order. If you have many unrelated tasks that should each end on their own git branch, look at claude-automation under [Related projects](#related-projects).
 
-It uses tokens, so before it starts it shows the model, an estimate of the starting size and of the README if it reads it, and asks `Continue? [y/N]`. Answering no uses nothing. The estimates are the character count divided by 4. The script cannot show a live counter inside the Claude session. Type `/cost` there for real usage and `/context` for the size. Choose the model with `-m` (default is `MODEL` from the config). It needs a terminal and the `claude` command, and it also works before you have a config or a state file. The "no project folder" and "state file not found" errors point to it.
+**You need:**
 
-### Requirements
-
-| Needed | Why |
+| Requirement | Notes |
 | --- | --- |
-| bash 4.4 or newer | The script is pure bash. Check with `bash --version`. macOS ships bash 3.2, so install a newer one with Homebrew |
-| `claude` (Claude Code), logged in | Each run is a `claude -p` session |
-| `git` | The project must be a git repository. Each task is committed |
-| `setsid`, `timeout`, `readlink`, `stat`, `awk`, `sed` | Standard on Linux (util-linux and coreutils). On macOS, install coreutils and util-linux with Homebrew |
-| `jq` (optional) | Live progress while a run works (see `-v`). Without it, output appears when each run ends |
-| `curl` or `wget` | Only for the install script |
+| A Linux computer | macOS needs changes first (see [TODO.md](TODO.md)). Other systems are untested |
+| Claude Code, installed and signed in | Sessions use your Claude plan's usage or your Anthropic API account |
+| bash 4.4 or newer, and git | Standard on most Linux systems. Check with `bash --version` and `git --version` |
+| `jq` (recommended) | Lets you watch progress live. Without it, you see each session's output when it ends |
+| `curl` or `wget` | Only for installing |
 
-### Install
+## From an idea to a finished build
 
-Run one of these. Each downloads `install.sh` from this repository and runs it:
+The quality of the build depends on the quality of the plan. A clear plan means fewer retries, lower cost, and work closer to what you wanted. claude-build handles the building. A companion project, [claude-skills](https://github.com/ToddE/claude-skills), handles the planning.
+
+```mermaid
+flowchart LR
+  A[Your idea] --> B[Planning documents<br/>with claude-skills]
+  B --> C[Task list<br/>BUILD_STATE.md]
+  C --> D[claude-build<br/>runs the tasks]
+  D --> E{Review point}
+  E -->|you approve| D
+  D --> F[Finished work<br/>in git]
+```
+
+**1. Shape the idea.** claude-skills includes a set of planning skills for Claude. A skill is a packaged set of instructions that Claude follows for a specific job. Starting from an idea, they help you write:
+
+| Document | It answers |
+| --- | --- |
+| PR/FAQ | The people the product serves, the problem it solves, and the reason someone would use it. Written as an imagined announcement plus questions and answers |
+| Use cases | The steps a person takes to get something done with the product |
+| Functional requirements | The things the software must do, each with an id you can trace |
+| Test cases | The checks that prove each requirement works |
+| Architecture review | A check of the planned design, with the changes to make before building |
+
+You can do this in a claude.ai chat or in Claude Code. The claude-skills README explains how to install the skills, or how to try them in one chat without installing.
+
+**2. Turn the plan into a task list.** You have three ways:
+
+- **The `build-plan` skill** in claude-skills reads the documents above and writes the task list, a settings file, and project rules for Claude Code. It asks what it still needs, such as your programming language and the commands that check the work. It also confirms that every requirement has a task. This gives the best result.
+- **`claude-build --init`** reads a plan you wrote, such as a `PLAN.md`, and drafts the task list for you. Good for smaller projects.
+- **Write it yourself**, starting from [examples/BUILD_STATE.md](examples/BUILD_STATE.md).
+
+[examples/PLAN.md](examples/PLAN.md) is a short plan in a shape that turns into a good task list, and [examples/BUILD_STATE.md](examples/BUILD_STATE.md) is the task list made from it.
+
+**3. Review the task list.** Read it before you build. Claude Code works through the rows one session at a time, and a vague task wastes a session.
+
+**4. Build, review, finish.** claude-build works through the list, pauses at your review points, and stops when the list is done.
+
+## Install
+
+Run this in a terminal:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ToddE/claude-build/main/install.sh | bash
 ```
-or
+
+If you prefer to read the installer first:
+
 ```bash
-wget -qO- https://raw.githubusercontent.com/ToddE/claude-build/main/install.sh | bash
-```
-
-To read the script before running it, download it first:
-
-```
 curl -fsSLO https://raw.githubusercontent.com/ToddE/claude-build/main/install.sh
 less install.sh
 bash install.sh
 ```
 
-The installer:
+The installer checks your bash version, lists any missing tools, downloads the latest release, and puts a `claude-build` command in `~/.local/bin`. It tells you if that folder is missing from your `PATH` (the list of folders your terminal searches for commands).
 
-1. Checks for bash 4.4 or newer and warns about any missing tool from the table above.
-2. Picks the latest GitHub release, or `main` if there is no release yet.
-3. Downloads the script, the example config, and this manual to `~/.local/share/claude-build/<version>/`. It refuses a file that is not a bash script or has a syntax error.
-4. Links `~/.local/bin/claude-build` to that copy.
-5. Tells you if `~/.local/bin` is not on your `PATH`.
+Check that it worked:
 
-Then check it:
-
-```
+```bash
 claude-build --version
-claude-build              
 ```
 
-Options are environment variables placed before `bash`:
+**Updating.** `claude-build --check-update` tells you whether a newer version exists. `claude-build --update` installs it after asking you. claude-build uses the network for these two commands only. It does not check for updates on its own.
 
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `CLAUDE_BUILD_VERSION` | latest release, else `main` | A release tag such as `v0.1.0`, or `main` |
-| `BIN_DIR` | `~/.local/bin` | Where the `claude-build` link goes |
-| `SHARE_DIR` | `~/.local/share/claude-build` | Where the files go |
-| `CLAUDE_BUILD_KEEP` | `2` | How many installed versions to keep, newest first |
+**Removing it.** `rm ~/.local/bin/claude-build && rm -r ~/.local/share/claude-build`
 
-For example, `curl -fsSL .../install.sh | CLAUDE_BUILD_VERSION=v0.1.0 bash` installs that version.
+## Your first build, step by step
 
-**Upgrading.** Check with `claude-build --check-update`, which asks GitHub for the latest release, prints whether a newer one exists, and changes nothing. Install it with `claude-build --update`, which shows the installer URL and asks `Continue? [y/N]`. Or run the install command again. Either way the installer downloads into a temporary folder, checks the files, and copies them into place only if every check passes. The new version goes beside the previous one and the link moves. Older versions are removed (see `CLAUDE_BUILD_KEEP`). `--update` pipes the installer straight into bash and does not save a copy of it. To roll back one version, run `ln -sfn ~/.local/share/claude-build/<old version>/claude-build.sh ~/.local/bin/claude-build`. These two flags are the only times the script uses the network, and it never checks on its own, so a build that runs unattended never changes or contacts anything. `--update` works for copies made by the installer. For a git clone it tells you to run `git pull`.
+This walkthrough builds a project in a folder called `~/myapp`. Replace the name with your own.
 
-**Your config.** Put a config you want to keep at `~/.local/share/claude-build/claude-build.conf`. The installer links it into each version folder, so it survives upgrades. The installer never overwrites a config. You can also keep configs inside your projects and pass `-c`.
+**1. Make the project folder a git repository.** claude-build saves each task as a commit, so it needs git.
 
-**Uninstall.** Remove the link and the folder: `rm ~/.local/bin/claude-build && rm -r ~/.local/share/claude-build`.
-
-**Without the installer.** Clone the repository and link the script yourself (see "Installing on your PATH" below).
-
-### Commands
-
-```
-claude-build                              show the full help. Nothing starts.
-claude-build -c blog.conf                 preview using blog.conf. Nothing starts.
-claude-build -c blog.conf -s              print the last state and the end of the log. Nothing starts.
-claude-build -c blog.conf -r              really run, in this terminal. Quiet: a line per step.
-claude-build -v -c blog.conf -r           run verbosely: print the state first and show the model's output live.
-claude-build -c blog.conf -b              really run, in the background, and get your terminal back.
-claude-build -c blog.conf -k              stop the background build.
+```bash
+mkdir -p ~/myapp && cd ~/myapp
+git init
+echo ".build/" > .gitignore
+git add .gitignore && git commit -m "Start"
 ```
 
-These examples assume the script is on your `PATH` as `claude-build` (see "Installing on your PATH"). If a `claude-build.conf` sits beside the script, or in the folder you run it from, `-c blog.conf` can be left out.
+The `.build/` folder holds claude-build's logs and reports. The `.gitignore` line keeps it out of your project's history.
 
-The script has these modes. Only `-r`, `-b`, and `-o` start work:
+**2. Add a settings file.** Create `~/myapp/claude-build.conf` with these lines:
 
-| You run | What happens |
-| --- | --- |
-| no arguments | Prints the full help and exits |
-| flags, but not `-r`, `-b`, `-o`, or `-s` | **Preview.** Shows the config in use, the project, the state counts, the settings, and the exact prompt, then exits. Starts nothing. Add `-v` to print the state report first |
-| `-s` | **Status.** Prints the last state, the recent tasks, and the end of the log, then exits. Works while a build runs and after it has ended. Starts nothing |
-| `-r` | **Really run, in this terminal.** Quiet: a line for each step. Keeps going until the build ends or you press Ctrl+C |
-| `-b` | **Really run, in the background.** The script starts itself again, detached from the terminal, and returns to you. No `&` or `nohup` needed |
-| `-o` | **Run one cycle** and exit. For cron or a timer |
-| `-k` | **Stop** the background build |
-| `-v` | **Verbose**, added to a preview or a run flag. Prints the state report first, and with `-r` or `-o` shows the model's output live as well as logging it |
-
-Because preview is the default, a stray command cannot spend tokens. Progress is printed to the terminal and appended to the log file (`.build/build.log`, and `.build/supervisor.log` for `-b`). Follow it with `tail -f`, or look at the state at any time with `-s`.
-
-### Where it runs from
-
-You can run `claude-build.sh` from any folder. It never assumes the folder you are in is the project.
-
-| What | How it is found |
-| --- | --- |
-| The script's own folder | Where the real file lives. Symlinks are followed, so a link in `~/.local/bin` works |
-| The config file | `-c FILE`, else `claude-build.conf` in the folder you are in, else the one beside the real script. The preview shows which was used |
-| The project folder | `-d DIR`, else `PROJECT_DIR` in the config, else the folder above the script **only if** it is a git repository. Otherwise the script stops and asks. It never falls back to the current folder |
-| State file, context paths, prompt file, log directory | Relative to the project folder, or absolute |
-| `-c` and `-d` given on the command line | Relative to the folder where you typed the command, because they are needed before the project is known |
-| A relative `PROJECT_DIR` inside a config | Relative to the folder holding that config |
-
-```
-cd /tmp && ~/Workspace/inform9/scripts/claude-build.sh -m opus        works from here (a preview): the config sets PROJECT_DIR
-~/bin/claude-build -r -c ~/builds/blog.conf -d ~/Workspace/blog   works from anywhere
+```bash
+PROJECT_NAME="myapp"
+PROJECT_DIR="/home/you/myapp"
 ```
 
-### Installing on your PATH
+Use the full path to your folder. claude-build finds this file by itself when you run it from this folder. [examples/claude-build.conf](examples/claude-build.conf) lists every other setting, with an explanation of each.
 
-The installer does this for you. To do it by hand, for one user, put a symlink in `~/.local/bin` (not `/usr/local/bin`, which would let every account on the machine start unattended builds with your login):
+**3. Get a task list.** If you used the `build-plan` skill, copy the `BUILD_STATE.md` it wrote into the folder and skip to step 4. Otherwise, put your plan in `PLAN.md` and ask claude-build to draft the list:
 
-```
-git clone https://github.com/ToddE/claude-build ~/Workspace/claude-build
-ln -s ~/Workspace/claude-build/claude-build.sh ~/.local/bin/claude-build
-claude-build               full help, from any folder
-claude-build -m sonnet     preview
+```bash
+claude-build --init PLAN.md            # shows what it would do. Starts nothing
+claude-build --init PLAN.md -m opus -r # writes BUILD_STATE.md, using the opus model
 ```
 
-The link finds its config in the folder you run it from, or beside the real file. Use a symlink, not a copy: a copy has no config beside it, so it needs `-c` or a `claude-build.conf` in the folder you run it from. The help text and the hints it prints use the name you typed, so `claude-build` works as well as `claude-build.sh`. To use the same script for another project, give that project its own config and pass `-c` and `-d`, or set `PROJECT_DIR` in a copy of the config.
+Commands without `-r` only show you what would happen. That makes it safe to try things. Add `-r` to do it for real.
 
-## 2. How it works
+If your plan leaves something unclear, `--init` lists the open questions at the end of `BUILD_STATE.md` and pauses the build until you answer them. Add `-I` to answer them in the terminal instead.
 
-Each cycle, the script does this in plain shell, with no model:
+**4. Read and edit the task list.** Open `BUILD_STATE.md`. A row holds a task, a model, and an effort level. Change anything you disagree with. Section [The task list file](#the-task-list-file) explains the format.
 
-| Step | Check | Result |
-| --- | --- | --- |
-| 1 | Is a stop file present? | Exit 0 |
-| 2 | Read `STATUS` from the state file | `done` exits 0, `blocked` exits 2, `gate` exits 3, anything but `ready` exits 64 |
-| 3 | Is a backoff active after a failed run? | Print "waiting until HH:MM" and sleep |
-| 4 | Is the project a git repository? | If not, exit 1 |
-| 5 | Start one run of `claude -p` with the prompt and the allowed commands | The run does its tasks and commits |
-| 6 | Did the run finish a task? | If two runs in a row finish none, mark the state `blocked` and exit 2 |
-| 7 | Sleep, then repeat | `AFTER_RUN` seconds after a good run, `INTERVAL` seconds otherwise |
+**5. Preview the build.**
 
-Properties you can rely on:
-
-- **Fresh context every run.** A run reads the state file and only the files it needs, not a conversation. A usage limit or crash costs at most the task in progress, which stays `todo` and repeats.
-- **Backoff after a failure.** A failed run (for example a usage limit) waits 1 hour, then 2, 4, and 6 hours between tries. A good run clears the wait.
-- **No endless empty runs.** A run that exits cleanly but completes nothing counts against a limit of two, then the build stops as blocked.
-- **One copy at a time.** A lock keeps a terminal run and a cron run from overlapping.
-- **Tasks per run is an instruction.** The prompt tells the model to do up to `TASKS_PER_RUN` tasks. A run also ends at `TIMEOUT`.
-
-## 3. Flags, one by one
-
-Every flag has a short and a long form. A flag overrides the config file, which overrides the built-in default. If you repeat a flag, the last one wins, except `-i`, which adds paths.
-
-### What to do
-
-#### `-r`, `--run`
-Really run the supervisor loop in this terminal. It stays quiet: a line when it starts, a line for each run and wait, and a line when the build ends. It keeps cycling until the build is done, blocked, at a gate, or you stop it. Without `-r`, `-b`, or `-o` the script only previews. Add `-v` for a verbose run: the state report is printed first (whether a loop is running, the status, the next task and the model and effort it will use, the done count, the recent tasks, and the log tail), and the model's output is shown live as well as logged. While a run works, `-r` on a terminal shows an animated line with the task, the model, the elapsed time, and the number of changed files. It is erased when the run ends. With `-v` the progress lines take its place. Background and cron runs show no animation.
-```
-./claude-build.sh -r
-./claude-build.sh -r -m opus -t 2        run on Opus, two tasks per run
+```bash
+claude-build -v
 ```
 
-#### `-b`, `--background`
-Really run the loop in the background. The script checks the project and git first, then starts itself again in a detached session and returns after about two seconds. It prints the process id, the log to follow, and the commands to look at the state (`-s`) and to stop it (`-k`). Closing the terminal does not stop it. If a build is already running, it says so and does nothing else. All other flags and the config work as with `-r`. `-b -v` prints the state report before it starts.
-```
-./claude-build.sh -b
-./claude-build.sh -b -m opus -t 2 -c ~/builds/blog.conf
-```
+This shows the project, the next task, the model and effort it will use, the commands Claude Code may run, and the exact instructions each session receives. It starts nothing.
 
-#### `-k`, `--stop`, and `--kill-now`
+**6. Start the build and watch it.**
 
-`-k` stops the build gently. If a run is in progress, it asks the loop to stop when that run finishes, so the model finishes and commits its tasks and nothing is lost. A run can take a while, and `-k` prints which task is running, for how long, and how to watch it. If no run is in progress (the loop is waiting between runs), it stops at once. Changed your mind? Remove `.build/stop`.
-
-`--kill-now` stops at once, even in the middle of a task, and stops everything the build started. The task in progress stays `todo`, its files are left uncommitted in the working tree, and the next run starts that task again from the beginning, so check `git status` first. Use it when something is wrong, or when you do not want to pay for the rest of a long run.
-
-Both work from a second terminal, and both work on a build started with `-r` or `-b`. Ctrl+C in the terminal where `-r` is running also stops it (the Claude session is in the terminal's foreground group since 1.1.1).
-
-```
-claude-build -c blog.conf -k             stop after the run in progress
-claude-build -c blog.conf --kill-now     stop right now
+```bash
+claude-build -rv --watch
 ```
 
-#### `-o`, `--once`
-Run exactly one cycle and exit. It does one model run if the state is `ready` and no backoff is active. Use it from cron or a timer. It is quiet, so cron mail stays small. Add `-v` to print the state report first and show the model's output. Exit codes are as in section 10.
-```
-./claude-build.sh -o
-*/30 * * * * /path/to/project/scripts/claude-build.sh -o        (crontab line)
-```
-
-#### `-s`, `--status`
-Print the last state and the end of the log, then exit. It shows whether a build loop is running, the status and any blocked reason, any backoff wait, the next task with the model and effort it will use, how many tasks are done, the last five finished tasks, and the last 15 lines of the log with values from `REDACT_FILES` replaced by `[hidden]`. No build is started, no lock is taken, and the model is never called. It works while a build runs in another terminal, in the background, or from cron, and after the build has ended.
-
-It looks in the log directory of the project it resolves to: `PROJECT_DIR/LOG_DIR` (default `.build`), for the project named by `-d`, or by `PROJECT_DIR` in the config that `-c` names, or in the folder-local or script-local config. It does not scan for other builds. Give it the same `-c` (and `-l`, if you set one) you started the build with.
-```
-claude-build -c ~/builds/blog.conf -s
-```
-`-s` stands alone. Combining it with `-r`, `-b`, or `-o` is an error.
-
-#### `--watch`
-
-A live dashboard for a running build. It has an animated header over the same report as `-s`, and it redraws the report every 5 seconds until you press Ctrl+C (change the interval with `WATCH_EVERY=2`, or `WATCH_EVERY` in the config). It needs a terminal.
-
-`--watch` only watches. It never starts a build by itself, so it needs either a build that is already running or a run flag:
-
-| You run | What happens |
-| --- | --- |
-| `claude-build -c blog.conf -rv --watch` | Starts the build in this window and shows the dashboard. Ctrl+C once stops the build after the task it is on, and twice stops it now. When the build ends, the window prints the build's own summary and what to do next, then returns to the shell |
-| `claude-build -c blog.conf -b --watch` | Starts the build in the background and shows the dashboard. Ctrl+C closes only the dashboard. The build keeps running, and `-k` stops it |
-| `claude-build -c blog.conf --watch` | Watches a build that is already running (started with `-b` or in another window). When it stops (finished, reached a review point, blocked, or stopped with `-k`), the dashboard leaves its last picture on screen and returns to the shell |
-| `claude-build -c blog.conf --watch` with nothing running | Prints "Nothing will run. --watch only watches..." with the commands above, and exits. It does not draw a dashboard |
+`-r` runs the build, `-v` shows more detail, and `--watch` shows a live dashboard:
 
 ```
 ⠹ ▒▓█▓▒░······················  working on task 2.2 (sonnet) 4m12s
 ██████░░░░░░░░░░░░░░ 16/66 (24%)  activity ▁▁▃▅█▂▁▁▄▆█▃▂▁▃▅▇█▄▂
-inform9 build
+================================================================
+myapp build
   build loop: running (pid 1129519)
   status:     ready
+  next:       2.2  Sign-up, verify, sign-in, and reset endpoints
+  ...
+-- recent activity (newest last) --
   ...
 ```
 
-- **Layout:** the two header lines stay pinned at the top of the window, under them is a divider (`=====`), then the status report, a second divider (`-- recent activity --`) and the newest log lines, and the hints on the last row. The screen never scrolls, so log text cannot cover the header. Long lines are clipped at the window edge, the log shrinks to fit the window height, and a resize redraws it.
-- **Top line:** while a run is working, a bright block sweeps back and forth with a trail and a spinner turns, and the elapsed time counts up. When nothing is running it shows the state: a pulsing `●` at a review point, a blinking `✖` when stopped and needing you, or `✔` when complete.
-- **Second line:** a progress bar with the task count, and a sparkline of the build's activity over the last 20 minutes, one bar per minute, drawn from the steps in the log. A flat line during a run means the model is thinking or waiting.
-- **The report below:** status, next task, how long the current run has been going, files changed, saved snapshots, recent tasks, and the end of the log.
-- **No Unicode?** On a terminal that is not UTF-8, it uses plain characters.
-- It cannot be combined with `-o`.
+The moving bar shows that a session is working. The progress bar counts finished tasks. The activity line shows how busy the build was in each of the last 20 minutes.
 
-#### `-v`, `--verbose`, `-V`, `--very-verbose`
+To stop, press Ctrl+C once: the build finishes the task it is on, saves it, and stops. Press Ctrl+C twice to stop at once. claude-build keeps a copy of any unfinished work, and the next run picks up that task again.
 
-Modifiers, not modes. `-v` prints the state report first (without the old log tail), and with `-r` or `-o` shows progress in the terminal as the run works, one line per step, with a time. The model's markdown (bold, code, headings, bullets) is shown as terminal formatting. Set `NO_COLOR=1` to turn the formatting off.
+**7. At a review point.** The build pauses and prints what it built, what to check, and the exact steps to continue. Section [Review points](#review-points) covers this.
 
-- **`-v`** shows what the model says, every edit, and commands that matter (tests, installs, commits). Look-around steps (reading files, searching, `ls`, `git status` and the like) collapse into a single dim line that is overwritten as the model works, so you can see it is busy without a wall of reads.
-- **`-V`** (also `-vv`) shows every step, including each file read and search.
-- The log in `.build/build.log` always has every step, whichever level you use, so `tail -f` shows everything. The raw stream of the latest run is in `.build/last-run.jsonl`.
-- This needs `jq`. Without `jq`, the output appears when each run ends. `STREAM=0` in the config turns live progress off.
-- With `-b`, the state report is printed before backgrounding, and the background copy does not echo to the terminal. Follow it with `tail -f`.
+**8. Finish.** The build prints a summary and writes a report to `.build/report-latest.md`. Look through the commits with `git log --oneline`. claude-build does not publish or deploy anything. Do that yourself when you are satisfied.
 
-```
-claude-build -v -c blog.conf                  verbose preview
-claude-build -c blog.conf -rv                 run with live progress
-claude-build -c blog.conf -rV                 run with every step
-```
+## Day to day
 
-#### Preview (no flag)
-There is no flag to ask for a preview. When you pass flags but not `-r`, `-b`, `-o`, or `-s`, the script prints the config in use, the project, state counts, settings, context paths, allowed commands, and the exact prompt, then exits. It needs no git repository. Add the flags you want to test.
-```
-./claude-build.sh -m haiku -t 3 -i docs/spec.md      preview what -r would do with these
-./claude-build.sh -c ~/builds/blog.conf               preview another project
-```
+Run these from your project folder.
 
-#### `-h`, `--help`
-Print the full help. The same text appears when you run with no arguments.
-
-#### `--init [PATH...]`, `-I`, `--interactive`
-
-Draft the state file from your plan (section 1, "Before you start"). `--init` is long form only. Alone it previews: the model, the effort, the paths it will read, the file it will write, whether it will ask questions, and the exact prompt. With `-r` it runs one planning session. Pass the plan as paths after `--init` or with `-i PATH` (repeatable), or set `CONTEXT_FILES` in the config. Choose the model with `-m` or `MODEL`, and the output file with `-S`. It cannot be combined with `-b`, `-o`, `-s`, or `-k`, and it never overwrites an existing state file. The session may use only `Read`, `Glob`, `Grep`, and `Write`, so it cannot run commands.
-
-Unclear points are written under `## Open questions` and the state is set to `blocked`. `-I` (`--interactive`, only with `--init`) starts an interactive session that asks you the questions instead. Answering them in the plan beforehand gives the best table.
-
-#### `--guide`
-
-Interactive help from Claude for a setup that is not working (section 1, "Stuck?"). Long form only. It shows an estimate of the tokens it will use and asks before it starts. It stands alone: it cannot be combined with `--init`, `-r`, `-b`, `-o`, `-s`, or `-k`, and it never starts a build. The session may use only `Read`, `Glob`, and `Grep`. Use `-m` and `-e` to choose the model and effort, and `-c` and `-d` if your config or project is not in the default place.
-
-#### `--check-update`, `--update`
-
-`--check-update` asks GitHub for the latest release and says whether it is newer than the version you run. It changes nothing. `--update` does the same, then asks before it downloads and runs the installer for that release (it needs a terminal). Both are long form only, stand alone, need no config or project, and need `curl` or `wget`. `--update` refuses a git clone and shows the `git pull` command instead.
-
-#### `--version`
-
-Print the version and exit.
-
-### Where things are
-
-#### `-c`, `--config FILE`
-Use another settings file. A relative path is relative to where you typed the command. Default: `claude-build.conf` beside the real script (not in the current folder). The file is read as shell, so use only your own. A missing file named with `-c` is an error (exit 64).
-```
-./claude-build.sh -r -c ~/builds/blog.conf
-```
-
-#### `-d`, `--project DIR`
-The project folder. The script changes into it before doing anything, and every relative path (state file, context paths, prompt file, log directory) is relative to it. A relative `-d` is relative to where you typed the command. Default: `PROJECT_DIR` from the config, else the folder above `scripts/` if that is a git repository, else the script stops. It never defaults to the current folder.
-```
-./claude-build.sh -r -d ~/Workspace/blog -c ~/builds/blog.conf
-```
-
-#### `-S`, `--state FILE`
-The state file, relative to the project (or an absolute path). Default `BUILD_STATE.md`. See section 4.
-```
-./claude-build.sh -r -S planning/PROGRESS.md
-```
-
-#### `-l`, `--log-dir DIR`
-Where the log, lock, backoff, failure counter, and stop file live. Default `.build`. Give each project, or each build in the same project, its own directory.
-```
-./claude-build.sh -r -l .build-docs
-```
-
-### What each run is told
-
-#### `-P`, `--prompt TEXT`
-The instruction given to every run. The default is: read the state file, continue at `NEXT`, do up to N tasks, update the state file and commit after each, set `blocked` at a stop condition, do not deploy or push. A flag prompt replaces a prompt from the config and clears any `PROMPT_FILE`.
-
-Placeholders, filled in before the run starts:
-
-| Placeholder | Becomes |
+| To do this | Run |
 | --- | --- |
-| `{state_file}` | The state file name |
-| `{tasks_per_run}` | The value of `-t` |
-| `{context}` | A sentence listing the `-i` paths, or nothing if there are none |
-| `{model}`, `{effort}` | The model and effort chosen for this run |
-| `{model_rule}` | Tells the run to do only tasks for its model and to stop before one that needs a different model. Added automatically at the end of your prompt if you do not use it |
+| See what would happen, without starting anything | `claude-build -v` |
+| Start the build in this window and watch it | `claude-build -rv --watch` |
+| Start it in this window without the dashboard | `claude-build -rv` |
+| Start it in the background, so you can close the window | `claude-build -b` |
+| Start it in the background and watch it | `claude-build -b --watch` |
+| Watch a build that is already running | `claude-build --watch` |
+| Check progress once | `claude-build -s` |
+| Stop after the task in progress | `claude-build -k` |
+| Stop at once | `claude-build --kill-now` |
+| Continue after a review point or a problem | `claude-build --ready`, then `claude-build -rv --watch` |
+| Read the latest report | open `.build/report-latest.md` |
+| See everything the sessions did | `less .build/build.log` |
+| Get help from Claude with your setup | `claude-build --guide` |
+
+**Changing the plan while you work.** Edit `BUILD_STATE.md` between runs. Set a row back to `todo` to redo it, add rows, or change `NEXT:` to jump to another task.
+
+## Review points
+
+A review point is a row in the task list whose task starts with `GATE`. The build stops there and prints a summary like this:
 
 ```
-./claude-build.sh -r -P 'Read {state_file}. {context} Do the NEXT task only, then commit.' -t 1
+== PAUSED FOR REVIEW: 15 of 66 tasks done ==
+
+  What was built: the workspace and a test that fills in a W-9 form.
+  Why it stopped: the plan asks a person to look at the filled form.
+  1. Open /home/you/myapp/tests/output/w9-render-sample.png ...
+
+Step 1. Change one line in the state file
+  File: /home/you/myapp/BUILD_STATE.md   (line 5, near the top)
+  Now:     STATUS: gate
+  Change:  STATUS: ready
+  Shortcut: run claude-build --ready and it makes this edit for you.
+
+Step 2. Start the build again
+  Command: claude-build -rv
+  ...
 ```
 
-#### `-f`, `--prompt-file FILE`
-Read the prompt from a file instead. The same placeholders work inside the file. Use it for long prompts. If a config sets `PROMPT_FILE` and you pass `-P`, the flag wins.
-```
-./claude-build.sh -r -f prompts/build.txt
-```
+The "What was built" part comes from one short Claude session that explains the stop for someone who has not read the planning documents. The steps come from claude-build itself. The same summary, plus a list of what was built and what is left, goes into `.build/report-latest.md`.
 
-#### `-i`, `--context PATH`
-A file or directory the run should start reading from. Repeat the flag for more. The prompt tells the run to read only the parts the task needs, so listing a directory is cheap. The first `-i` on the command line replaces the config's list. Missing paths are shown as a warning by `-n`.
-```
-./claude-build.sh -r -i docs/spec.md -i docs/api/ -i planning/
-```
+To continue: do the review, run `claude-build --ready`, then start the build again.
 
-### How each run is done
+**To finish part of the work by hand.** The report includes a prompt to paste into Claude Code, in a terminal or in an editor such as VS Code or VSCodium with the Claude Code extension. It gives Claude the situation and asks it to wait for you before it starts the next task.
 
-#### `-m`, `--model NAME`
-Force one model for every run, passed to `claude --model`. This turns `MODEL_FROM_STATE` off for the run, so the Model column is ignored. Without `-m`, each run uses the model named for the next task (see "Model and effort per task" below), and the config's `MODEL` is only the fallback. Use a stronger model for harder work and a smaller one for mechanical work, but choose once, not by retrying.
-```
-./claude-build.sh -r -m opus
+**Review without stopping.** Add `GATE_MODE="continue"` to your settings file. The build then records each review point in the report and keeps going. A row whose task starts with `GATE!` still stops the build. Use `GATE!` for decisions that later work depends on.
+
+**Automated checks at review points.** List the commands that prove your project works, such as its tests, in the `GATE_CHECKS` setting:
+
+```bash
+GATE_CHECKS=("npm test" "npm run lint")
 ```
 
-#### `-e`, `--effort LEVEL`
-Force one effort level for every run, passed to `claude --effort`: how much the model reasons before it answers. Levels are `low`, `medium`, `high`, `xhigh`, and `max`. This turns `EFFORT_FROM_STATE` off for the run. Without `-e`, effort comes from the task's Effort cell, else from the model's default in `EFFORT_DEFAULTS`.
-```
-./claude-build.sh -r -e low
-./claude-build.sh -r -m opus -e xhigh
-```
+claude-build runs these commands itself at each review point and at the end of the build. No model decides whether they passed. If one fails, claude-build starts a session that receives the failing command and its output, fixes the cause, and commits. Then it runs the checks again. It tries this twice by default, first with `sonnet` and then with `opus`. If the checks still fail, the build stops and the report shows the failure.
 
-#### `-M`, `--permission-mode MODE`
-The Claude Code permission mode. Default `acceptEdits`, which accepts file edits without asking. Commands still need to be on the allowed list (section 5).
+A fix could make a check pass by weakening a test. The report lists any test files a fix session changed, so you can look at them. Sessions are also asked to add tests for each milestone before its review point.
 
-#### `-t`, `--tasks-per-run N`
-How many tasks each run attempts. Default 5. Smaller values mean smaller contexts and more frequent saves. Larger values mean fewer start-ups.
-```
-./claude-build.sh -r -t 2
-```
+With `GATE_MODE="continue"` and `GATE_CHECKS` together, the build runs to the end without stopping, unless a check keeps failing or it reaches a `GATE!` row, and writes one report at the end. Add the check commands to `ALLOWED_TOOLS` as well, so sessions can run them, for example `"Bash(npm test:*)"`.
 
-#### `-T`, `--timeout DURATION`
-The longest a single run may take. Default `3h`. Uses the `timeout` command's units: `90s`, `45m`, `3h`. A run killed by the timeout counts as a failed run and backs off.
-```
-./claude-build.sh -r -T 90m
-```
+## Fixing problems
 
-### Timing
+Start here when something looks wrong:
 
-#### `-w`, `--interval SECONDS`
-How long to wait when there is nothing to do, or after a failed run (the backoff may be longer). Default 1200 (20 minutes).
-```
-./claude-build.sh -r -w 600
-```
+1. Run `claude-build -s` to see the status, the next task, and the end of the log.
+2. Open `.build/report-latest.md` if the build stopped on its own.
+3. Run `claude-build --guide`. It opens a Claude session that looks at your setup, asks what you want to do, and gives you the exact commands. It shows an estimate of the tokens it will use and asks before it starts.
 
-#### `-a`, `--after-run SECONDS`
-How long to wait after a good run before the next one starts. Default 30.
+Common situations:
 
-### Combining flags
-
-Flags can come in any order, and single-letter flags can be bundled behind one dash: `-rv` is `-r -v`, and `-rvc blog.conf` is `-r -v -c blog.conf`. A letter that takes a value (`-c`, `-d`, `-S`, `-P`, `-f`, `-i`, `-m`, `-M`, `-t`, `-T`, `-w`, `-a`, `-l`, `-e`) must be the last letter in its bundle, and its value is the next argument. `-cv blog.conf` is an error, because `-c` would need to be last. Long flags (`--run`) are never bundled, and a value that starts with a dash, such as a prompt, is taken as written.
-
-Examples of bundles:
-```
-claude-build -rv -c blog.conf         verbose run
-claude-build -vrc blog.conf           the same, with the config last
-claude-build -bvc blog.conf           background, verbose start, config
-claude-build -sc blog.conf            status for blog.conf
-claude-build -kc blog.conf            stop the build for blog.conf
-```
-
-A few combinations have a defined meaning, and the script rejects the ones that do not make sense instead of picking one quietly.
-
-| Combination | Result |
-| --- | --- |
-| `-c FILE` plus any settings flags (`-m`, `-t`, `-i`, ...), no run flag | Preview with those settings. Nothing starts |
-| `-v` plus no run flag | Verbose preview: the state report, then the settings and prompt |
-| `-s` | Print the state and the log tail, then exit |
-| `-r` | Really run in this terminal, quietly |
-| `-v -r` | Run verbosely: the state report first, the model's output live |
-| `-b` | Really run in the background, quietly. `-b -v` prints the state report first |
-| `-o` | Run one cycle, quietly. `-o -v` prints the report and the model's output |
-| `-r`, `-b`, and `-o` together (any two) | Error. Choose one |
-| `-s` plus `-r`, `-b`, or `-o` | Error. `-s` stands alone |
-| `-k` plus any of `-r`, `-b`, `-o`, `-s` | Error. `-k` stands alone |
-| `-m` or `-e` plus any run flag | The run uses that model or effort for every task |
-
-```
-claude-build -c blog.conf -b -m opus -t 2             background, forced to opus, two tasks per run
-claude-build -d ~/Workspace/blog -S docs/PROGRESS.md -i docs/ -r      no config file: say everything on the command line
-```
-
-### Flag summary
-
-| Short | Long | Default |
+| You see | It means | Do this |
 | --- | --- | --- |
-| -r | --run | off |
-| -o | --once | off |
-| -s | --status | off |
-| | --watch | off. Live dashboard. Needs a running build, or -r or -b |
-| -v | --verbose | off |
-| -V | --very-verbose | off. Every step, including reads and searches |
-| -b | --background | off |
-| -k | --stop | off |
-| -h | --help | |
-| -I | --interactive | off. With `--init`, ask questions in the terminal |
-| | --check-update | off. Say whether a newer release exists |
-| | --update | off. Install the newest release, after asking |
-| | --guide | off. Interactive help from Claude. Asks before using tokens |
-| | --init | off. Draft the state file from the `-i` paths. Preview unless `-r` |
-| | --version | |
-| -c | --config FILE | claude-build.conf beside the script |
-| -d | --project DIR | `PROJECT_DIR` in the config, else the folder above scripts/ if it is a git repo |
-| -S | --state FILE | BUILD_STATE.md |
-| -l | --log-dir DIR | .build |
-| -P | --prompt TEXT | built-in prompt |
-| -f | --prompt-file FILE | none |
-| -i | --context PATH | none |
-| -m | --model NAME | per task from the state file, fallback sonnet |
-| -e | --effort LEVEL | per task from the state file, else by model |
-| -M | --permission-mode MODE | acceptEdits |
-| -t | --tasks-per-run N | 5 |
-| -T | --timeout DURATION | 3h |
-| -w | --interval SECONDS | 1200 |
-| -a | --after-run SECONDS | 30 |
+| A preview, and nothing runs | You left out `-r` or `-b` | Add `-r` or `-b` |
+| `Nothing will run. --watch only watches` | `--watch` on its own does not start a build | Use `-rv --watch` or `-b --watch` |
+| `state file not found` | No task list in the project | See step 3 of [Your first build](#your-first-build-step-by-step) |
+| `No project folder` | claude-build cannot tell which folder to work in | Set `PROJECT_DIR` in `claude-build.conf`, or pass `-d FOLDER` |
+| `waiting until 18:40 after a failed run` | A session failed, often from a usage limit | Leave it running. It tries again at that time |
+| `BLOCKED` | The build needs a decision from you | Read the reason in the report, fix it, then `claude-build --ready` |
+| The same task keeps repeating | Its row never became `done` | Look at the log and the row, then fix the task or mark it `done` |
+| A session fails at once | Claude Code is signed out, or a command it needs is not allowed | Read the end of `.build/build.log`. See [The settings file](#the-settings-file) for `ALLOWED_TOOLS` |
 
-### Model and effort per task
+The [Troubleshooting table](#troubleshooting-table) in the reference lists more.
 
-With `MODEL_FROM_STATE=1` (the default), **the script chooses the model, and no model orchestrates.** Before each run it reads the `Model` cell of the task named in `NEXT` and starts `claude` with that model.
+## Safety and cost
 
-- **Names:** `Sonnet`, `Opus`, and `Haiku` are read as `sonnet`, `opus`, and `haiku`. Extra words are ignored, so `Sonnet (copywriter)` is `sonnet`. Anything else is passed to `claude --model` as written.
-- **Batching:** a run does the next task and any later tasks that name the same model, up to `TASKS_PER_RUN`. It stops before a task for a different model, and the script starts a new run on that model. A task list that groups same-model tasks therefore needs few start-ups.
-- **Effort:** the same way. The task's `Effort` cell is used if there is one. Otherwise the model's level in `EFFORT_DEFAULTS` is used (`opus=high`, `sonnet=medium`, `haiku=low`).
-- **Fallbacks:** a task with no `Model` cell uses `MODEL`. If no level is found, `EFFORT` is used, and if that is empty, the Claude Code default.
-- **Forcing:** `-m` forces one model for every run and uses that model's default effort. `-e` forces one effort. A forced run ignores the Model and Effort cells.
-- **Visible:** the terminal and the log show it, for example `running: next task 0.8 on opus, effort xhigh (7/66 done)`, and a preview shows `next run: task 0.8 on opus, effort xhigh`.
+**Nothing runs by accident.** Commands without `-r`, `-b`, or `-o` only show what would happen. Running `claude-build` with no options prints the help.
 
-Choosing the model for each task once, instead of starting low and redoing the work on a higher model, avoids repeat runs.
+**Limited permissions.** Sessions may only use the tools and commands in the `ALLOWED_TOOLS` setting. The default list lets Claude Code read and edit files and make commits. It leaves out pushing to GitHub, deploying, and deleting.
 
-## 4. The state file
+**Your work is saved.** Claude Code commits each finished task to git, so you can undo any task. While a session works, claude-build saves a snapshot of unfinished files every 60 seconds, and again if the session fails or you stop it. A snapshot is a hidden git commit that does not touch your branch or your files. See [Files it writes](#files-it-writes) for how to look at one.
 
-The state file is the only thing a project must provide, and the build does not start without it. The build does not choose your tasks while it runs. You write the file, or draft it once with `--init` (section 1) and edit it. It is how the build resumes, so the script and the model read and write it, and nothing is kept in a conversation.
+**One build at a time.** A lock file stops a second copy from starting in the same project.
+
+**Your settings file runs as code.** claude-build reads `claude-build.conf` as a bash script, so use only settings files you wrote or checked. It refuses a file that other users can change.
+
+**Cost.** Sessions use your Claude plan's usage or your API account. Waiting, checking, snapshots, and the dashboard cost nothing. To keep the cost down:
+
+- pick the model for each task once, in the task list, instead of starting low and redoing work on a stronger model
+- keep tasks small and specific, so each session reads less
+- preview with `-v` before you run
+- keep `TASKS_PER_RUN` low (2 or 3) for large tasks, so Claude Code commits more often
+
+A failed session waits 1, 2, 4, then 6 hours before the next try. Two sessions in a row that finish nothing stop the build, so a broken task cannot keep spending.
+
+## Under the hood
+
+claude-build is one bash script. Between sessions, it runs plain shell commands and no model. One cycle goes like this:
+
+1. Stops if someone asked it to stop.
+2. Reads `STATUS:` from the task list. `ready` continues. `gate`, `blocked`, and `done` stop the build and write a report.
+3. Waits, if a session failed recently.
+4. Reads the next task's model and effort, and starts one Claude Code session with them. The session does that task and any following tasks that use the same model, up to `TASKS_PER_RUN`.
+5. Checks that the session finished at least one task.
+6. Waits 30 seconds, then repeats.
+
+A session starts fresh and reads only the task list and the files the task needs. A crash or a usage limit costs at most the task in progress.
+
+claude-build chooses the model for each session from the task list, so no model decides which model runs next.
+
+## Related projects
+
+Running `claude -p` (Claude Code without a chat window) in a loop, with progress kept in files and git, is often called the Ralph Wiggum loop. claude-build follows that pattern and adds a task list with a model per task, review points, waiting after failures, a list of allowed commands, snapshots, and reports.
+
+- [Ralph Wiggum loop](https://kartit.net/blog/ralph-wiggum-technique.html): the original shell loop.
+- [loopgen](https://github.com/pro-vi/loopy): generates the prompt, state, and queue files for a long-running loop.
+- [claude-automation](https://pypi.org/project/claude-automation/): an overnight pipeline with plan, code, review, and test stages, and one git branch per task.
+- [Orchestra](https://pkg.go.dev/github.com/MochaCosine1206/orchestra): a Go tool that runs `claude -p` rounds with limits on runaway loops.
+
+---
+
+# Reference
+
+## Commands
+
+Run `claude-build` with no options to print the full help.
+
+claude-build only starts work with `-r`, `-b`, or `-o`, and you can use one of the three at a time. Options without a value can be combined behind one dash: `-rv` means `-r -v`. An option that takes a value goes last in a group: `-rvc myapp.conf`.
+
+**Starting and stopping**
+
+| Option | Does |
+| --- | --- |
+| `-r`, `--run` | Run the build in this window |
+| `-b`, `--background` | Run the build in the background and give the window back. Closing the window does not stop it |
+| `-o`, `--once` | Run one cycle and exit. For schedules (see [Running on a schedule](#running-on-a-schedule)) |
+| `-k`, `--stop` | Stop after the session in progress finishes its task. Stops at once if no session is running |
+| `--kill-now` | Stop at once. The task in progress stays `todo`, its files stay in the folder, and a snapshot keeps a copy |
+| `--ready` | After a review point or a block, change `STATUS` to `ready`. Starts nothing |
+
+**Watching**
+
+| Option | Does |
+| --- | --- |
+| `-s`, `--status` | Print the status, the next task, recent tasks, and the end of the log |
+| `--watch` | Live dashboard. Use it with `-r` or `-b` to start a build, or alone to watch a build that is already running |
+| `-v`, `--verbose` | Print the status first. While running, show what Claude says, each edit, and commands such as tests and commits. File reads and searches collapse into one line that updates in place |
+| `-V`, `--very-verbose` | Like `-v`, and also show each file read and search |
+
+In `-r --watch`, Ctrl+C once stops after the current task, and twice stops at once. In `-b --watch`, Ctrl+C closes the dashboard and the build keeps running.
+
+**Planning and help**
+
+| Option | Does |
+| --- | --- |
+| `--init PLAN.md` | Draft the task list from your plan. Shows what it would do, until you add `-r`. It does not overwrite an existing task list |
+| `-I`, `--interactive` | With `--init`: Claude asks you its questions in the terminal first |
+| `--guide` | Open a Claude session that helps you with your setup. Asks before it uses tokens |
+| `-h`, `--help` | Print the help |
+| `--version` | Print the version |
+| `--check-update` | Say whether a newer version exists |
+| `--update` | Install the newest version, after asking |
+
+**Settings you can set for one run** (each overrides the settings file)
+
+| Option | Sets | Default |
+| --- | --- | --- |
+| `-c`, `--config FILE` | Settings file | `claude-build.conf` in this folder, else beside the script |
+| `-d`, `--project DIR` | Project folder | `PROJECT_DIR` from the settings file |
+| `-S`, `--state FILE` | Task list file | `BUILD_STATE.md` |
+| `-l`, `--log-dir DIR` | Folder for logs and reports | `.build` |
+| `-m`, `--model NAME` | One model for every task | From the task list |
+| `-e`, `--effort LEVEL` | One effort level for every task | From the task list |
+| `-t`, `--tasks-per-run N` | Most tasks per session | `5` |
+| `-T`, `--timeout TIME` | Longest one session may run, such as `90m` or `3h` | `3h` |
+| `-i`, `--context PATH` | File or folder each session starts reading from. Repeat for more | none |
+| `-P`, `--prompt TEXT` | Instructions for each session | built in |
+| `-f`, `--prompt-file FILE` | Read the instructions from a file | none |
+| `-M`, `--permission-mode MODE` | Claude Code permission mode | `acceptEdits` |
+| `-w`, `--interval SECONDS` | Wait when there is nothing to do or after a failure | `1200` |
+| `-a`, `--after-run SECONDS` | Wait between sessions | `30` |
+
+claude-build refuses these combinations and says why: two of `-r`, `-b`, `-o`; `-s` with a run option; `-k` or `--kill-now` with a run or status option; `--watch` with `-o`.
+
+## The task list file
+
+The task list is a Markdown file, `BUILD_STATE.md` by default. claude-build reads the top lines and the table, and Claude Code updates them after each task.
 
 ```
 # Build state
 
 STATUS: ready
-NEXT: 0.1
+NEXT: 1.1
 BLOCKED_REASON:
 
-| Id | Milestone | Task | Model | Status | Commit | Notes |
-| --- | --- | --- | --- | --- | --- | --- |
-| 0.1 | M0 | Scaffold the workspace | Sonnet | todo | | |
-| 0.2 | M0 | Configure wrangler | Sonnet | todo | | |
+| Id | Milestone | Task | Model | Effort | Status | Commit | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1.1 | M1 | Create the project layout from PLAN.md section 2. `npm test` runs | haiku | | todo | | |
+| 1.2 | M1 | Design the module interface in docs/design.md | opus | high | todo | | |
+| G1 | M1 | GATE. Review docs/design.md before the code is written | | | todo | | |
 ```
 
 | Part | Rules |
 | --- | --- |
-| `STATUS:` | `ready` runs work. `blocked` waits for a person and needs a reason. `gate` waits for a person to review. `done` ends the loop. The script reads the first line that starts with `STATUS:` |
-| `NEXT:` | The id of the next task. The run sets it after each task |
-| `BLOCKED_REASON:` | Filled in when `STATUS` is `blocked` |
-| Task table | A Markdown table whose header has `Id` and `Status` columns. `Status` is `todo`, `doing`, or `done`. Optional `Model` and `Effort` columns say which model and effort level each task should use (below). `Task`, `Milestone`, and `Commit` are shown by `-s` when present. Other columns are ignored |
+| `STATUS:` | `ready` lets the build run. `gate` pauses for a review. `blocked` pauses for a problem and needs `BLOCKED_REASON`. `done` ends the build |
+| `NEXT:` | The `Id` of the next task |
+| `BLOCKED_REASON:` | The reason the build is blocked |
+| `Id` and `Status` columns | Required. `Status` is `todo`, `doing`, or `done` |
+| `Task` column | The instruction for the session. Name the file or section to read and a check that proves the task is done, such as a command that passes |
+| `Model` column | `haiku`, `sonnet`, or `opus`. Empty uses `MODEL` from the settings file |
+| `Effort` column | `low`, `medium`, `high`, `xhigh`, or `max`. Empty uses the model's usual level: `opus` high, `sonnet` medium, `haiku` low |
+| `Commit` and `Notes` columns | Filled in by the sessions. A task that fails twice gets a diagnosis in Notes and moves to `opus` |
+| Review rows | A task that starts with `GATE` pauses the build. `GATE!` pauses it even with `GATE_MODE="continue"` |
+| `## Open questions` | Optional, after the table. `--init` lists unclear points here |
 
-A complete example with models, effort levels, batching, and a gate is in [examples/BUILD_STATE.md](examples/BUILD_STATE.md), built from the plan in [examples/PLAN.md](examples/PLAN.md). Copy it into your project as `BUILD_STATE.md` and replace the rows. A task row is all the model sees besides the context files and the repository, so each row should say what to read and how to check the result.
+**Tips**
 
-A literal `|` inside a cell must be written `\|`, because the table is split on `|`. The preview and `-s` warn about a row whose cell count differs from the header.
+- A session sees its task row, the files it reads, and the project. Write each task so it makes sense on its own.
+- Put tasks that use the same model next to each other. One session handles a run of same-model tasks, which saves start-up time.
+- Write a literal `|` inside a cell as `\|`. The preview and `-s` warn about a row with the wrong number of cells.
 
-Each run updates the table and `NEXT`, and commits, after every task. To change what happens next, edit the file: set a row back to `todo`, add rows, or change `NEXT`.
+## The settings file
 
-## 5. The config file
+`claude-build.conf` holds settings as `NAME=value` lines. It runs as bash, so it must belong to you and other users must not be able to change it. Order of priority: an option on the command line, then this file, then the built-in default.
 
-`claude-build.conf` is read as shell: `KEY=value` lines and arrays. It is run, so only trust your own. Order of precedence: built-in default, then this file, then flags. Which file is used: `-c`, else `claude-build.conf` in the folder you are in, else the one beside the script. It must be owned by you and not writable by everyone. For a new project, copy [`examples/claude-build.conf`](examples/claude-build.conf), a complete template that documents every setting, lists the other values each can take, and ends with ready-made recipes (cautious, documentation, overnight, patient backoff, long prompt, two builds in one project). `claude-build.conf` in this folder is the working file for this project. The shipped working file documents every setting in place: what it does, where the file or folder it names is stored, its default, and the flag that overrides it. The table below is a summary.
+[examples/claude-build.conf](examples/claude-build.conf) explains every setting and ends with ready-made combinations, such as one for documentation projects and one for overnight builds.
 
-| Key | Default | Meaning |
+| Setting | Default | Meaning |
 | --- | --- | --- |
-| `PROJECT_NAME` | `build` | Shown in the log and in the `-s` report |
-| `PROJECT_DIR` | none (see "Where it runs from") | Same as `-d`. The project folder on this computer, as an absolute path. The state file, context paths, log directory, and redact files are all relative to it |
-| `STATE_FILE` | `BUILD_STATE.md` | Same as `-S` |
-| `PROMPT` | built-in | Same as `-P`. Placeholders as above |
-| `PROMPT_FILE` | none | Same as `-f`. Wins over `PROMPT` |
-| `CONTEXT_FILES` | `()` | Array, same as `-i` |
-| `MODEL` | `sonnet` | Same as `-m`. The fallback model, used when `MODEL_FROM_STATE` is `0` or a task has no Model cell |
-| `MODEL_FROM_STATE` | `1` | `1` starts each run on the model named in the next task's Model column. `0` uses `MODEL` for every run |
-| `EFFORT` | empty | Same as `-e`. The fallback effort level. Empty means the Claude Code default |
-| `EFFORT_FROM_STATE` | `1` | `1` uses the next task's Effort cell, else `EFFORT_DEFAULTS`. `0` uses `EFFORT` for every run |
-| `EFFORT_DEFAULTS` | `("opus=high" "sonnet=medium" "haiku=low")` | Array of `model=level`. The effort for each model when a task has no Effort cell |
-| `PERMISSION_MODE` | `acceptEdits` | Same as `-M` |
-| `ALLOWED_TOOLS` | read, edit, write, search, and a few safe git and shell commands | Array. The only tools and commands an unattended run may use. See below |
-| `EXTRA_CLAUDE_ARGS` | `()` | Array of extra arguments passed to `claude` |
-| `CLAUDE_BIN` | `claude` | The command to run. Set an absolute path if cron cannot find it |
-| `TASKS_PER_RUN` | `5` | Same as `-t` |
-| `TIMEOUT` | `3h` | Same as `-T` |
-| `INTERVAL` | `1200` | Same as `-w` |
-| `AFTER_RUN` | `30` | Same as `-a` |
-| `BACKOFF_STEPS` | `(3600 7200 14400 21600)` | Seconds to wait after the 1st, 2nd, 3rd, and later failures |
-| `LOG_DIR` | `.build` | Same as `-l` |
-| `REQUIRE_GIT` | `1` | Set `0` to allow a project that is not a git repository. Not recommended |
-| `REDACT_FILES` | `(".env.local")` | Files whose values are hidden if they appear in the log lines that `-s` prints |
+| `PROJECT_NAME` | `build` | Name shown in messages |
+| `PROJECT_DIR` | none | Full path to the project folder |
+| `STATE_FILE` | `BUILD_STATE.md` | The task list |
+| `CONTEXT_FILES` | none | Files or folders each session starts reading from, such as `("PLAN.md" "docs/")` |
+| `PROMPT`, `PROMPT_FILE` | built in | Instructions for each session (see [Custom prompts](#custom-prompts)) |
+| `MODEL` | `sonnet` | Model for tasks with no `Model` cell |
+| `MODEL_FROM_STATE` | `1` | `1` uses each task's `Model` cell. `0` uses `MODEL` for every task |
+| `EFFORT` | empty | Effort for tasks with no `Effort` cell and no model default |
+| `EFFORT_FROM_STATE` | `1` | `1` uses each task's `Effort` cell |
+| `EFFORT_DEFAULTS` | `("opus=high" "sonnet=medium" "haiku=low")` | Effort by model |
+| `ALLOWED_TOOLS` | read, edit, write, search, `ls`, `cat`, and git status, diff, add, commit, log | The only tools and commands a session may use. Add your project's check commands, such as `"Bash(npm test:*)"`. Leave out push, deploy, and delete |
+| `PERMISSION_MODE` | `acceptEdits` | Lets sessions edit files without asking |
+| `TASKS_PER_RUN` | `5` | Most tasks per session |
+| `TIMEOUT` | `3h` | Longest one session may run |
+| `INTERVAL` | `1200` | Seconds to wait when there is nothing to do |
+| `AFTER_RUN` | `30` | Seconds between sessions |
+| `BACKOFF_STEPS` | `(3600 7200 14400 21600)` | Seconds to wait after the first, second, third, and later failures |
+| `GATE_MODE` | `stop` | `continue` records review points and keeps going |
+| `GATE_CHECKS` | none | Commands claude-build runs itself at each review point and at the end, such as `("npm test")` |
+| `GATE_FIX_TRIES` | `2` | Fix sessions to try when a check fails, before the build stops |
+| `FIX_MODELS` | `("sonnet" "opus")` | Model for each fix attempt, in order |
+| `CHECK_TIMEOUT` | `30m` | Longest one check command may run |
+| `TEST_GLOBS` | common test paths | Paths counted as tests when the report lists test files a fix changed |
+| `REPORT` | `1` | `1` has a model explain each stop in plain words. `0` skips that call |
+| `REPORT_MODEL`, `REPORT_EFFORT` | `sonnet`, `low` | Model for that explanation |
+| `SNAPSHOT_EVERY` | `60` | Seconds between snapshots of unfinished work. `0` turns them off |
+| `SNAPSHOT_KEEP` | `60` | Snapshots to keep |
+| `STREAM` | `1` | Live progress (needs `jq`). `0` shows output when each session ends |
+| `WATCH_EVERY` | `5` | Seconds between dashboard refreshes |
+| `BG_WAIT_CEILING_MS` | `0` | Milliseconds a session waits for helper agents it started. `0` waits until `TIMEOUT` |
+| `LOG_DIR` | `.build` | Folder for logs and reports |
+| `REDACT_FILES` | `(".env.local")` | Files whose values `-s` hides in the log lines it prints |
+| `CLAUDE_BIN` | `claude` | The Claude Code command. Use a full path for schedules |
+| `EXTRA_CLAUDE_ARGS` | none | Extra options passed to `claude` |
+| `REQUIRE_GIT` | `1` | `0` allows a folder without git. Not recommended |
 
-### Example for a documentation project
+## Finding the settings and the project
+
+You can run claude-build from any folder.
+
+| Item | Search order |
+| --- | --- |
+| Settings file | `-c FILE`, else `claude-build.conf` in the folder you are in, else `claude-build.conf` beside the script |
+| Project folder | `-d DIR`, else `PROJECT_DIR` in the settings file, else the folder above the script if it is a git repository. If none of these applies, it stops and says so |
+| Task list, context paths, log folder | Inside the project folder, unless you give a full path |
+| `-c` and `-d` paths | Relative to the folder you typed the command in |
+
+Run from the project folder with `claude-build.conf` in it, and you can leave out `-c` and `-d`. To manage several projects, give each its own settings file and pass `-c`.
+
+## Files it writes
+
+In the log folder, `.build` by default:
+
+| File | Holds |
+| --- | --- |
+| `build.log` | The script's messages and the steps of the sessions |
+| `report-latest.md` | The newest stop report. Older ones are `report-YYYY-MM-DD-HHMM.md` |
+| `last-run.jsonl` | The raw output of the latest session |
+| `costs.tsv` | The cost each session reported |
+| `review-items.tsv` | Review points passed with `GATE_MODE="continue"`, with their check results |
+| `checks-last.txt` | Output of the latest `GATE_CHECKS` run |
+| `tests-changed.tsv` | Test files that fix sessions changed |
+| `supervisor.log` | Messages from a background build |
+| `watch-run.log` | Output of a build started with `-r --watch` |
+| `build.lock`, `current_run` | The process id of the running copy, and the task it is on |
+| `backoff_until`, `failures` | The wait after failures |
+| `stop` | A stop request. `-k` creates it. Starting a build removes an old one |
+
+Snapshots of unfinished work live in git, outside your branches:
 
 ```bash
-PROJECT_NAME="docs"
-STATE_FILE="docs/PROGRESS.md"
-CONTEXT_FILES=("docs/" "STYLE.md")
-PROMPT='Read {state_file}. {context} Do the NEXT task, then update {state_file} and commit. Stop at a gate.'
-MODEL="haiku"
-TASKS_PER_RUN=8
-ALLOWED_TOOLS=("Read" "Edit" "Write" "Glob" "Grep" "Bash(git add:*)" "Bash(git commit:*)" "Bash(git status:*)")
+git for-each-ref refs/claude-build/rescue                          # list them
+git diff HEAD refs/claude-build/rescue/20261008-225133 --stat     # what one holds
+git checkout refs/claude-build/rescue/20261008-225133 -- src/app.ts   # bring back a file
 ```
 
-### The allowed list
+## Exit codes
 
-`ALLOWED_TOOLS` is how you keep an unattended run safe. Each entry is a tool (`Read`, `Edit`, `Write`, `Glob`, `Grep`, `Agent`) or a command pattern such as `Bash(pnpm:*)`. Anything not listed is refused, and the run fails or stops. Leave out `git push`, deploy commands, and anything that deletes. If a run fails because a command is blocked, `build.log` shows which, and you can add it if it is safe.
-
-## 6. Checking progress
-
-There is no server to run. Progress goes to the terminal and to a log file, and you can look at the state whenever you like.
-
-| What you want | How |
+| Code | Meaning |
 | --- | --- |
-| Watch it live | Run with `-r` and read the terminal. A line prints each cycle, such as `running: next task 0.4 (3/66 done)` or `waiting until 18:40 after a failed run` |
-| Follow a background build | `tail -f .build/supervisor.log` (the path is printed when you start with `-b`) |
-| See everything the model printed | `.build/build.log` |
-| Print the last state at any time | `./claude-build.sh -v`. It also works after the build has ended |
-| See the state file itself | Open `BUILD_STATE.md` (or your `STATE_FILE`). Each task row and `NEXT` are updated after every task |
-| See the work | `git log --oneline`. Every task is a commit |
+| 0 | The build is done, you asked it to stop, or one `-o` cycle finished |
+| 1 | It cannot start, for example the project is not a git repository |
+| 2 | Blocked. Read the reason, fix it, then `--ready` |
+| 3 | At a review point |
+| 64 | A wrong option, a missing or unsafe settings file, a missing project or task list, `--watch` with nothing to watch, or an unknown `STATUS` |
 
-`-s` prints something like this:
+## Running on a schedule
 
-```
-inform9 build
-  build loop: running (pid 18342)
-  status:     ready
-  next:       0.4  Settings service
-  tasks:      3 of 66 done
-  recent:
-    0.3  Environment loading
-    0.2  Wrangler configs
-    0.1  Scaffold
-
-log, last 15 lines (/home/you/project/.build/build.log):
-  ...
-```
-
-## 7. Everyday tasks
-
-| I want to | Do this |
-| --- | --- |
-| See what would run | Run it with the flags you want, but without `-r`. For example `./claude-build.sh -m opus -t 1` |
-| Look at progress without running | `./claude-build.sh -v` |
-| Start and watch | `./claude-build.sh -r` in one terminal, and `./claude-build.sh -v` or `tail -f .build/build.log` in another |
-| Run in the background | `./claude-build.sh -b` |
-| Stop the background build | `./claude-build.sh -k` |
-| Pause after the current run | Set `STATUS: gate` in the state file. Or `touch .build/stop` |
-| Stop right now | Ctrl+C. The task in progress is left uncommitted. Run `git status` and restore |
-| Continue after a gate | Review, set `STATUS: ready`, run again |
-| Fix a block | Read `BLOCKED_REASON`, fix it, set `STATUS: ready` and clear the reason |
-| Redo a task | Set its row to `todo` and `NEXT:` to its id |
-| Skip a task | Mark its row `done` with a note, and set `NEXT:` to the next id |
-| Use a stronger model for one stretch | `./claude-build.sh -r -m opus -t 1` for a task, then go back |
-| Take smaller steps | `-t 1` or `-t 2` |
-| Work on another project | `-d ~/Workspace/other -c ~/builds/other.conf` |
-| Run two builds at once | Give each its own `-l`, for example `-l .build-a` and `-l .build-b` |
-| Start from a different folder of documents | `-i path/` (repeat as needed) |
-
-### A gate in practice
-
-1. A run reaches a milestone gate and sets `STATUS: gate`. The script prints a summary and exits with code 3. The summary is written by the script, not by the model, so it always says the same things:
-
-   ```
-   == GATE (G1) reached: 15 of 66 tasks done ==
-   Gate:
-     Report PDF spike results and wait for review
-   What the build left for you:
-     <the Notes cell of that row>
-   To continue:
-     1. Do the review above. The last messages in the log say what to check: <log path>
-     2. Open <state file> and change STATUS: gate to STATUS: ready.
-     3. Run: claude-build -c <config> -rv
-   ```
-2. You review the work and the commits. The model is also told to end a gate with a message that names each file to open, what a correct result looks like, and the edit that continues the build. That message is in the log (`tail -n 40 .build/build.log`).
-3. Set `STATUS: ready` and start again.
-
-A block (`STATUS: blocked`) prints the same kind of summary with the reason.
-
-### When work is committed, and the safety snapshots
-
-The script never commits. The model does: each run is told to update the state file and commit after every task. So work in a task that is still in progress is not in git, and a stop, a crash, a usage limit, or a power loss could lose it.
-
-To protect that work the build saves snapshots of unfinished work. A snapshot is a commit that is not on any branch, stored under `refs/claude-build/rescue/`. It holds your changed and new files (not files in `.gitignore`). Your branch, your history, your index, and your working tree are not touched. Snapshots are taken:
-
-- every `SNAPSHOT_EVERY` seconds (default 60) while a run is going, if anything changed. This uses no tokens: it is a few `git` commands run by the script, and it stores only what changed
-- when a run fails (usage limit, timeout, error)
-- when a run ends without finishing a task
-- when the build is interrupted with Ctrl+C
-- when you stop it with `--kill-now`
-
-The newest `SNAPSHOT_KEEP` (default 60) are kept. `claude-build -s` and `--watch` show how many exist.
-
-```
-git for-each-ref refs/claude-build/rescue                    list them, newest last
-git diff HEAD refs/claude-build/rescue/20261008-225133 --stat    what a snapshot holds compared to now
-git checkout refs/claude-build/rescue/20261008-225133 -- path/to/file    bring one file back
-```
-
-The next run is also told that uncommitted files are in the project, and to look at them before it starts the next task. Set `SNAPSHOT_EVERY=0` to turn the automatic snapshots off. Large new files that are not ignored are saved too, so keep build output in `.gitignore`.
-
-### The handoff report
-
-The aim is for the build to go as far as it can and then tell you, in plain words, what happened and what to do. Whenever the build stops because of a gate, a block, or completion, the script writes a report and prints a summary:
-
-- **Files:** `.build/report-YYYY-MM-DD-HHMM.md`, and `.build/report-latest.md` (always the newest).
-- **In plain words:** one short call to `REPORT_MODEL` (default `sonnet`, low effort) explains what was built, why it stopped, and what you need to do, for a person who has not read the planning files. It defines code names such as milestone and gate ids and names each file to open with its full path. Set `REPORT=0` to skip the call and use the task notes.
-- **What to do next:** the exact edit (`STATUS: gate` to `STATUS: ready`) and the command to restart.
-- **Review points passed, tasks that had trouble, what was built, what is left, and cost:** deterministic lists from the state file and the run logs. Cost is the total the runs reported.
-- **Manual mode:** how to finish by hand with Claude Code in VS Code, VSCodium (with the Claude Code extension), or the terminal, plus a prompt to paste that gives Claude the situation.
-
-**The restart steps** are spelled out in the terminal summary and in the report: the file and line number to edit, the line as it is now and as it should be, a shortcut command, and what the restart command does. For example:
-
-```
-Step 1. Change one line in the state file
-  File: /home/you/project/BUILD_STATE.md   (line 5, near the top)
-  Now:     STATUS: gate
-  Change:  STATUS: ready
-  Shortcut: run claude-build -c claude-build.conf --ready and it makes this edit for you.
-
-Step 2. Start the build again
-  Command: claude-build -c claude-build.conf -rv
-  What it does: runs in this terminal and shows each step as it works. It picks up at task 2.1 (...), keeps going, and stops at the next review point or problem, with a new report.
-  To run it in the background instead, use -b in place of -rv, and watch it with claude-build -c claude-build.conf --watch.
-```
-
-`--ready` is the shortcut. It changes `STATUS: gate` or `STATUS: blocked` to `STATUS: ready` (and clears `BLOCKED_REASON`), prints the line it changed, and starts nothing. It does not review anything for you, so use it after you have done the review.
-
-**Keep going past review points.** By default a `GATE` row stops the build. Set `GATE_MODE="continue"` in the config and a `GATE` row is recorded as a review point and the build carries on. The report lists the review points at the end. A row that starts with `GATE!` always stops, so use it for a decision that later work depends on.
-
-```
-== PAUSED FOR REVIEW: 15 of 66 tasks done ==
-
-  What was built: the workspace and a test that fills in a W-9 form ...
-  Why it stopped: the build wants a person to look at the filled form ...
-  1. Open /home/you/project/tests/output/w9-render-sample.png ...
-
-To continue automatically
-  Edit .../BUILD_STATE.md: change STATUS: gate to STATUS: ready, then run: claude-build -c ... -rv
-To work on it by hand
-  Open the project in VS Code or VSCodium with the Claude Code extension (or run: cd ... && claude).
-  The report has a prompt to paste.
-
-Full report: .../.build/report-2026-10-08-2217.md
-```
-
-## 8. Running unattended
-
-### In a terminal or tmux
-
-```
-./claude-build.sh -r
-```
-
-Leave it running. It prints a line each cycle. If the computer sleeps, the loop pauses and continues when it wakes.
-
-### In the background
-
-```
-./claude-build.sh -b
-```
-
-The script detaches itself, so you do not add `&` or `nohup`. Closing the terminal does not stop it. Stop it with `./claude-build.sh -k`. If the computer restarts, start it again, or use cron or a timer below.
-
-### From cron (survives a restart)
-
-`-o` runs one cycle and exits, so cron can start it often. Most runs end at once because there is nothing to do. cron has a minimal `PATH`, so give the full path to `claude` in the config.
+`-o` runs one cycle and exits, which suits cron (the Linux task scheduler). A schedule has a short `PATH`, so set `CLAUDE_BIN` to the full path of `claude` in your settings file.
 
 ```
 # crontab -e
-*/30 * * * * /home/you/project/scripts/claude-build.sh -o >> /home/you/project/.build/cron.log 2>&1
+*/30 * * * * /home/you/.local/bin/claude-build -c /home/you/myapp/claude-build.conf -o >> /home/you/myapp/.build/cron.log 2>&1
 ```
 
-In `claude-build.conf`:
-
-```bash
-CLAUDE_BIN="/home/you/.local/bin/claude"
-```
-
-### From a systemd user timer
-
-`~/.config/systemd/user/claude-build.service`:
+A systemd user timer works the same way. Create `~/.config/systemd/user/claude-build.service`:
 
 ```
 [Service]
 Type=oneshot
-WorkingDirectory=/home/you/project
-ExecStart=/home/you/project/scripts/claude-build.sh -o
+ExecStart=/home/you/.local/bin/claude-build -c /home/you/myapp/claude-build.conf -o
 ```
 
-`~/.config/systemd/user/claude-build.timer`:
+and `~/.config/systemd/user/claude-build.timer`:
 
 ```
 [Timer]
@@ -863,88 +589,50 @@ OnUnitActiveSec=30min
 WantedBy=timers.target
 ```
 
-Then `systemctl --user enable --now claude-build.timer`. Use one scheduler at a time. If two start together, the lock makes the second one exit.
+Then run `systemctl --user enable --now claude-build.timer`. Use one scheduler at a time. The lock stops two copies from running together.
 
-### What happens at a usage limit
+## Custom prompts
 
-The run fails, the script writes a backoff time, and each following cycle prints "waiting until HH:MM" without calling the model. After the wait it tries again from the state file. I cannot see your plan's reset time, so the backoff is a guess: 1, 2, 4, then 6 hours. Lower `BACKOFF_STEPS` if your limit resets sooner.
+A session receives a short set of instructions: read the task list, continue at `NEXT`, do up to `TASKS_PER_RUN` tasks, update the list and commit after each, stop at a review point or a problem, and do not deploy or push. claude-build adds rules about models, stop requests, and unfinished files from earlier sessions.
 
-## 9. Cost and energy
+To replace the instructions, set `PROMPT` or `PROMPT_FILE`, or pass `-P` or `-f`. claude-build fills in these placeholders:
 
-- An idle or finished build costs a few shell commands and no tokens.
-- A run starts with a small context. The prompt tells it to read only what the task needs, and `-i` points it at where to look.
-- A failed run backs off. It does not loop.
-- A run that finishes no task is counted, and the build stops after two.
-- Choose the model for the work once. Do not start low and redo on a higher model. Use `-m` to match a stretch of work, and `-t 1` when you want the smallest possible steps.
-- A run without `-r` or `-o` only previews, so you can check a change of prompt or flags before spending anything.
-
-## 10. Exit codes and files
-
-| Code | Meaning |
+| Placeholder | Becomes |
 | --- | --- |
-| 0 | Done, a stop file was found, or one `-o` cycle finished |
-| 1 | Cannot start, for example the project is not a git repository |
-| 2 | Blocked: `STATUS` is `blocked`, or two runs made no progress. Read the reason |
-| 3 | At a gate. Review, then set `STATUS: ready` |
-| 64 | Bad flag, a missing or unsafe config, a missing project or state file, or an unknown `STATUS` |
+| `{state_file}` | The task list file name |
+| `{tasks_per_run}` | The `TASKS_PER_RUN` value |
+| `{context}` | A sentence listing `CONTEXT_FILES`, or nothing |
+| `{model}`, `{effort}` | The model and effort for this session |
+| `{model_rule}` | Tells the session to stop before a task for a different model. Added at the end if you leave it out |
 
-Files written to the log directory (`.build` by default):
+Preview the result with `claude-build -v`.
 
-| File | Contents |
-| --- | --- |
-| `build.log` | Timestamped script messages and all output from the model runs |
-| `build.lock` | The process id of the copy that is running |
-| `backoff_until` | Unix time before which the loop will not try again |
-| `failures` | Count of failed runs in a row |
-| `stop` | Create it (`touch`) to stop the loop at the next check |
-| `supervisor.log` | Output of a `-b` run (the script's own messages) |
+## Testing without spending tokens
 
-Add the log directory to `.gitignore`.
+Set `CLAUDE_BIN` to a script of your own that stands in for Claude Code. A stand-in that marks the next task `done` and advances `NEXT` lets you watch a whole build finish without a session. [CONTRIBUTING.md](CONTRIBUTING.md) has a short setup.
 
-## 11. Testing without spending tokens
+## Troubleshooting table
 
-A preview shows what would run. To test the loop itself, point `CLAUDE_BIN` at a stand-in script that edits the state file as a real run would. In a test config:
-
-```bash
-CLAUDE_BIN="/path/to/fake-claude.sh"
-REQUIRE_GIT=0
-```
-
-A stand-in that exits 0 and does nothing lets you see the no-progress guard stop the build after two runs. A stand-in that marks the next task `done` and advances `NEXT` lets you watch a whole build finish. Use `-l` with a scratch directory.
-
-## 12. Troubleshooting
-
-| What you see | Cause | Fix |
+| You see | Cause | Fix |
 | --- | --- | --- |
-| `Choose one of -r, -b, or -o` and exit 64 | Two run flags were given together | Pick one |
-| `-k cannot be combined` and exit 64 | `-k` was given with a run or view flag | Run `-k` on its own |
-| The help text prints and nothing starts | You gave no arguments | Add a flag to preview, `-s` for the status, or `-r`, `-b`, or `-o` to run |
-| `PREVIEW ONLY` and nothing runs | Flags were given without `-r` or `-o` | Add `-r` (loop) or `-o` (one cycle) |
-| `refusing to use ... conf` and exit 64 | The config is owned by someone else or anyone can write to it | `chmod o-w` the file, or use your own |
-| `cannot run: run git init first` and exit 1 | Not a git repository | `git init` and make a first commit |
-| `already running (pid ...)` | A copy holds the lock | Wait, or stop it. If the pid is gone the lock clears itself |
-| `No project folder` and exit 64 | No `-d`, no `PROJECT_DIR` in the config, and the script is not inside a git repository | Set `PROJECT_DIR` in the config, or pass `-d FOLDER` |
-| `unknown STATUS` and exit 64 | The state file has no valid `STATUS:` line | Fix the first lines of the state file |
-| `0 0 done/total` in the preview | The task table has no `Id` and `Status` header | Match the header in section 4 |
-| Waiting until HH:MM, again and again | A usage limit or another failure | Read the end of `build.log`. The wait grows to 6 hours |
-| `BLOCKED: two runs made no progress` | Runs exit cleanly but finish nothing | Read `build.log` for what the model said, fix it, set `STATUS: ready` |
-| A run fails at once | A command is not on the allowed list, or `claude` is not logged in | Read `build.log`. Add the command to `ALLOWED_TOOLS` if it is safe |
-| Works in a terminal, fails in cron | cron cannot find `claude` | Set `CLAUDE_BIN` to its full path |
-| The same task keeps repeating | Its row never became `done` | Look at the commit and the row. Mark it `done` or change the task |
+| The help prints and nothing starts | No options | Add `-r` to run, `-s` for status, or other options to preview |
+| `PREVIEW ONLY` | No `-r`, `-b`, or `-o` | Add one |
+| `Choose one of -r, -b, or -o` | Two run options | Use one |
+| `refusing to use ... conf` | Another user can change the settings file | `chmod o-w claude-build.conf` |
+| `cannot run: run git init first` | The project is not a git repository | `git init`, then make a first commit |
+| `already running (pid ...)` | A copy is running for this project | Watch it with `--watch`, or stop it with `-k` |
+| `No project folder` | No `-d`, no `PROJECT_DIR`, and the script is not inside a git repository | Set `PROJECT_DIR`, or pass `-d` |
+| `state file not found` | No task list | Write one, or use `--init` |
+| `unknown STATUS` | The `STATUS:` line is missing or misspelled | Fix the top of the task list |
+| `0 0 done/total` in the preview | The table header lacks `Id` and `Status` | Match the header shown in [The task list file](#the-task-list-file) |
+| A warning about cells in a row | A `\|` inside a cell, or a missing cell | Write `\|`, or fix the row |
+| `waiting until HH:MM`, again and again | Repeated failures, often a usage limit | Read the end of `build.log`. The wait grows to 6 hours |
+| `no task finished in that run` | A session ended without finishing its task | Read `build.log` and the latest report. Two in a row block the build |
+| `Background tasks still running after 600s` in the log | A session handed work to a helper agent and ran out of waiting time | Upgrade to 1.2.4 or later, or remove `Agent` from `ALLOWED_TOOLS` |
+| Works in a terminal, fails on a schedule | The schedule cannot find `claude` | Set `CLAUDE_BIN` to its full path |
 
-## 13. Safety
+## License and contributing
 
-- An unattended run may use only the commands in `ALLOWED_TOOLS`. The default list has no deploy, push, or delete.
-- Nothing starts without `-r` or `-o`.
-- One copy runs at a time.
-- The config file is run as shell. Only use your own.
-- Every task is a commit, so any task can be reverted with git.
-- Keep secrets out of the state file and the log. `-s` hides values from `REDACT_FILES` in the log tail it prints, but the log file itself is not scrubbed, so keep it out of git and out of screenshots.
+claude-build is copyright 2026 A. Todd Emerson and licensed under the [Apache License 2.0](LICENSE). If you share it, or a changed version, keep the [LICENSE](LICENSE) and [NOTICE](NOTICE) files with it.
 
-## 14. License and credit
-
-claude-build is copyright 2026 A. Todd Emerson and licensed under the [Apache License 2.0](LICENSE). If you redistribute it, or a modified version, keep the [LICENSE](LICENSE) and [NOTICE](NOTICE) files with it and keep the copyright notices in the source files. Contributions are accepted under the same license (Apache-2.0, section 5).
-
-## 15. Contributing
-
-Contributions are welcome: bug reports, fixes, documentation, and the open items in [TODO.md](TODO.md) (macOS support is the largest). See [CONTRIBUTING.md](CONTRIBUTING.md) for how to test a change without spending tokens, and for what to include in an issue or pull request.
+Bug reports, fixes, and documentation are welcome. [TODO.md](TODO.md) lists open work, with macOS support the largest item. [CONTRIBUTING.md](CONTRIBUTING.md) explains how to test a change without spending tokens. [RELEASING.md](RELEASING.md) explains how releases are made.
