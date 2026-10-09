@@ -48,6 +48,7 @@ GATE_MODE="stop"       # stop = a GATE row pauses the build. continue = record i
 REPORT=1               # 1 = at every stop, write a report file and have a model explain it in plain words. 0 = report without the explanation
 REPORT_MODEL="sonnet"  # model that writes the plain-words explanation (one short call per stop)
 REPORT_EFFORT="low"
+QUIET_TOOLS=0          # 0 = -v prints every step. 1 = look-around commands (reading files, grep, ls) collapse into one live line
 STREAM=1               # 1 = log and show progress while a run works (needs jq). 0 = output appears when the run ends
 REDACT_FILES=(".env.local")
 CONFIG=""              # chosen below: -c, else ./claude-build.conf in the current folder, else the one beside this script
@@ -958,11 +959,10 @@ style_lines() {
     -e "s/^( *)[-*] /\\1• /"
 }
 
-# With -v on a terminal, look-around commands (reading files, grep, ls, and the like) are not printed one by one.
-# They become a single dim line that is overwritten as the model works, so you can see it is busy. -vv prints every step.
-# The log always keeps every step.
+# QUIET_TOOLS=1 (config): on a terminal, look-around commands (reading files, grep, ls, and the like) are not printed one by one.
+# They become a single dim line that is overwritten as the model works. Default 0: every step is printed. The log always keeps every step.
 tool_mark() {
-  if [ "$VERBOSE" -ge 2 ] || [ -z "$C_N" ]; then cat; return; fi
+  if [ "${QUIET_TOOLS:-0}" -ne 1 ] || [ -z "$C_N" ]; then cat; return; fi
   awk '
     function noisy(line,   t, name, cmd, n, seg, i, s) {
       if (line !~ /^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]   [A-Za-z_]+: /) return 0
@@ -977,7 +977,7 @@ tool_mark() {
     { if (noisy($0)) print "\001" $0; else print; fflush() }'
 }
 tool_ticker() {
-  if [ "$VERBOSE" -ge 2 ] || [ -z "$C_N" ]; then cat; return; fi
+  if [ "${QUIET_TOOLS:-0}" -ne 1 ] || [ -z "$C_N" ]; then cat; return; fi
   awk -v w="$(tput cols 2>/dev/null || echo 100)" '
     { if (substr($0, 1, 1) == "\001") { l = substr($0, 2); gsub(/\033\[[0-9;]*m/, "", l); printf "\r\033[2K\033[2m  … %s\033[0m", substr(l, 1, w - 6); shown = 1; fflush(); next }
       if (shown) { printf "\r\033[2K"; shown = 0 }
