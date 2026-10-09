@@ -313,11 +313,17 @@ Really run the loop in the background. The script checks the project and git fir
 ./claude-build.sh -b -m opus -t 2 -c ~/builds/blog.conf
 ```
 
-#### `-k`, `--stop`
-Stop the background build for this project. It ends any model run in progress (that task stays `todo` and repeats later) and removes the pid files. If nothing is running it says so. It finds the build through the project's log directory, so give it the same `-c` or `-d` you started with if they differ from the config in use.
+#### `-k`, `--stop`, and `--kill-now`
+
+`-k` stops the build gently. If a run is in progress, it asks the loop to stop when that run finishes, so the model finishes and commits its tasks and nothing is lost. A run can take a while, and `-k` prints which task is running, for how long, and how to watch it. If no run is in progress (the loop is waiting between runs), it stops at once. Changed your mind? Remove `.build/stop`.
+
+`--kill-now` stops at once, even in the middle of a task, and stops everything the build started. The task in progress stays `todo`, its files are left uncommitted in the working tree, and the next run starts that task again from the beginning, so check `git status` first. Use it when something is wrong, or when you do not want to pay for the rest of a long run.
+
+Both work from a second terminal, and both work on a build started with `-r` or `-b`. Ctrl+C in the terminal where `-r` is running also stops it (the Claude session is in the terminal's foreground group since 1.1.1).
+
 ```
-./claude-build.sh -k
-./claude-build.sh -k -c ~/builds/blog.conf
+claude-build -c blog.conf -k             stop after the run in progress
+claude-build -c blog.conf --kill-now     stop right now
 ```
 
 #### `-o`, `--once`
@@ -344,11 +350,20 @@ Status that refreshes. It shows the same report as `-s` and redraws it every 5 s
 claude-build -c blog.conf --watch
 ```
 
-#### `-v`, `--verbose`
-A modifier, not a mode. With a preview, `-v` prints the state report before the settings and prompt. With `-r` or `-o`, it prints the state report first and shows progress in the terminal as the run works, one line per step: what the model says and each tool it uses, with a time. The model's markdown (bold, code, headings, bullets) is shown as terminal formatting, and the log keeps plain text. Set `NO_COLOR=1` to turn the formatting off. The same lines are written to the log in every mode, so `tail -f .build/build.log` follows a run even without `-v`. This needs `jq`. Without `jq`, the model's output appears only when each run ends. The raw stream of the latest run is kept in `.build/last-run.jsonl`. Set `STREAM=0` in the config to turn live progress off. With `-b` the state report is printed before backgrounding, and the background copy does not echo to the terminal. Follow it with `tail -f`.
+#### `-v`, `--verbose`, `-V`, `--very-verbose`
+
+Modifiers, not modes. `-v` prints the state report first (without the old log tail), and with `-r` or `-o` shows progress in the terminal as the run works, one line per step, with a time. The model's markdown (bold, code, headings, bullets) is shown as terminal formatting. Set `NO_COLOR=1` to turn the formatting off.
+
+- **`-v`** shows what the model says, every edit, and commands that matter (tests, installs, commits). Look-around steps (reading files, searching, `ls`, `git status` and the like) collapse into a single dim line that is overwritten as the model works, so you can see it is busy without a wall of reads.
+- **`-V`** (also `-vv`) shows every step, including each file read and search.
+- The log in `.build/build.log` always has every step, whichever level you use, so `tail -f` shows everything. The raw stream of the latest run is in `.build/last-run.jsonl`.
+- This needs `jq`. Without `jq`, the output appears when each run ends. `STREAM=0` in the config turns live progress off.
+- With `-b`, the state report is printed before backgrounding, and the background copy does not echo to the terminal. Follow it with `tail -f`.
+
 ```
 claude-build -v -c blog.conf                  verbose preview
-claude-build -v -c blog.conf -r               verbose run
+claude-build -c blog.conf -rv                 run with live progress
+claude-build -c blog.conf -rV                 run with every step
 ```
 
 #### Preview (no flag)
@@ -520,6 +535,7 @@ claude-build -d ~/Workspace/blog -S docs/PROGRESS.md -i docs/ -r      no config 
 | -s | --status | off |
 | | --watch | off. Status that redraws every 5 seconds |
 | -v | --verbose | off |
+| -V | --very-verbose | off. Every step, including reads and searches |
 | -b | --background | off |
 | -k | --stop | off |
 | -h | --help | |

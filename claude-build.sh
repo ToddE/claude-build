@@ -48,12 +48,11 @@ GATE_MODE="stop"       # stop = a GATE row pauses the build. continue = record i
 REPORT=1               # 1 = at every stop, write a report file and have a model explain it in plain words. 0 = report without the explanation
 REPORT_MODEL="sonnet"  # model that writes the plain-words explanation (one short call per stop)
 REPORT_EFFORT="low"
-QUIET_TOOLS=0          # 0 = -v prints every step. 1 = look-around commands (reading files, grep, ls) collapse into one live line
 STREAM=1               # 1 = log and show progress while a run works (needs jq). 0 = output appears when the run ends
 REDACT_FILES=(".env.local")
 CONFIG=""              # chosen below: -c, else ./claude-build.conf in the current folder, else the one beside this script
 CONFIG_GIVEN=0
-ONCE=0; RUN=0; VIEW=0; BACKGROUND=0; STOPIT=0; VERBOSE=0; INIT=0; ASK=0; GUIDE=0; WATCH=0; READY=0; CHECK_UPDATE=0; UPDATE=0; POSITIONAL=()   # VIEW = status-only mode (-s), INIT = plan mode (--init), ASK = interactive plan mode (-I)
+ONCE=0; RUN=0; VIEW=0; BACKGROUND=0; STOPIT=0; VERBOSE=0; INIT=0; ASK=0; GUIDE=0; WATCH=0; READY=0; NOW=0; CHECK_UPDATE=0; UPDATE=0; POSITIONAL=()   # VIEW = status-only mode (-s), INIT = plan mode (--init), ASK = interactive plan mode (-I)
 
 # Bundled short flags: -rv is -r -v, and -vrc FILE is -v -r -c FILE. Letters that take a value must come last in a bundle.
 expand_flags() {
@@ -67,7 +66,7 @@ expand_flags() {
         for ((i=0;i<${#letters};i++)); do
           ch="${letters:i:1}"; last=$(( i == ${#letters}-1 ))
           case "$ch" in
-            [robksvhnI]) EXPANDED+=("-$ch") ;;
+            [robksvhnIV]) EXPANDED+=("-$ch") ;;
             [cdSPfimMtTwale]) EXPANDED+=("-$ch"); if [ $last -eq 1 ]; then needs_value=1; else echo "In $a, -$ch takes a value, so it must be the last letter of the bundle (for example -vrc FILE)."; exit 64; fi ;;
             *) echo "unknown option: -$ch in $a (try -h)"; exit 64 ;;
           esac
@@ -93,7 +92,8 @@ MODES
   -r                  really run, in this terminal. Quiet: a line per step
   -b                  really run, in the background, then return to the terminal
   -o                  run one cycle, then exit (for cron or a timer)
-  -k                  stop the background build
+  -k                  stop the build after the run in progress finishes (nothing lost)
+  --kill-now          stop at once, even mid-task (the task in progress repeats on the next run)
   --check-update      look for a newer release on GitHub and say so. Changes nothing
   --update            install the newest release (asks first). The only other network use
   --guide             stuck? opens an interactive Claude session that helps you choose flags and fix your setup.
@@ -102,7 +102,8 @@ MODES
                       Unclear points go under "## Open questions" (STATUS: blocked). Add -I to be asked
                       instead, in this terminal. Best results: answer scope questions upstream, in the plan
   -v                  verbose, added to a preview or any run flag: print the state report first, and
-                      with -r or -o show the model's output live as well as logging it
+                      with -r or -o show progress live: the model's messages, edits, and commands that matter
+  -V                  very verbose: also show every file read, search, and look-around command
   Nothing is ever started unless you pass -r, -b, or -o. Pick only one of those three.
   -k and -s stand alone. Flags can come in any order, and single letters can be bundled:
   -rv is -r -v, and -vrc FILE is -v -r -c FILE (a letter that takes a value goes last).
@@ -122,7 +123,7 @@ USAGE
   claude-build.sh -b [flags]       run in the background, then return to the terminal
   claude-build.sh -o [flags]       one cycle, then exit
   claude-build.sh -s [flags]       show the last state and the log tail
-  claude-build.sh -k [flags]       stop the background build
+  claude-build.sh -k [flags]       stop after the current run. --kill-now stops at once
   claude-build.sh -h               this text (also shown when run with no arguments)
   Every flag has a long form too: -r is --run, -v is --verbose, and so on (see FLAGS).
 
@@ -144,8 +145,10 @@ FLAGS  (a flag overrides the config file, which overrides the built-in default)
   -b, --background           run the loop in the background and return to the terminal
   -o, --once                 one cycle, then exit
   -s, --status               print the last state and the log tail. Starts no build
-  -v, --verbose              verbose: state report first, and the model's output live with -r or -o
-  -k, --stop                 stop the background build
+  -v, --verbose              verbose: state report first, and live progress with -r or -o (look-around commands collapse into one line)
+  -V, --very-verbose         very verbose: -v plus every file read, search, and look-around command (same as -vv)
+  -k, --stop                 stop after the run in progress finishes
+      --kill-now             stop at once, even mid-task
   -c, --config FILE          settings file (relative to where you run this)  [${CONFIG_USED}]
   -d, --project DIR          project folder (relative to where you run this) [${PROJECT_DIR:-not set}]
   -S, --state FILE           state file, relative to project   [$STATE_FILE]
@@ -284,6 +287,7 @@ while [ $# -gt 0 ]; do
     -o|--once) ONCE=1; shift ;;
     -s|--status) VIEW=1; shift ;;
     -v|--verbose) VERBOSE=$((VERBOSE+1)); shift ;;
+    -V|--very-verbose) VERBOSE=2; shift ;;
     -b|--background) BACKGROUND=1; shift ;;
     -k|--stop) STOPIT=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -291,6 +295,7 @@ while [ $# -gt 0 ]; do
     --guide) GUIDE=1; shift ;;
     --watch) VIEW=1; WATCH=1; shift ;;
     --ready) READY=1; shift ;;
+    --kill-now) STOPIT=1; NOW=1; shift ;;
     --check-update) CHECK_UPDATE=1; shift ;;
     --update) UPDATE=1; shift ;;
     -I|--interactive) ASK=1; shift ;;
@@ -308,7 +313,7 @@ fi
 
 # Flags that do not make sense together are an error.
 if [ $(( RUN + BACKGROUND + ONCE )) -gt 1 ]; then echo "Choose one of -r (run here), -b (run in the background), or -o (one cycle)."; exit 64; fi
-if [ $STOPIT -eq 1 ] && [ $(( RUN + BACKGROUND + ONCE + VIEW )) -gt 0 ]; then echo "-k (stop) cannot be combined with -r, -b, -o, or -s."; exit 64; fi
+if [ $STOPIT -eq 1 ] && [ $(( RUN + BACKGROUND + ONCE + VIEW )) -gt 0 ]; then echo "-k and --kill-now (stop) cannot be combined with -r, -b, -o, or -s."; exit 64; fi
 if [ $VIEW -eq 1 ] && [ $(( RUN + BACKGROUND + ONCE )) -gt 0 ]; then echo "-s (status) cannot be combined with -r, -b, or -o. Add -v to a run flag to see the state before it starts."; exit 64; fi
 
 if [ $GUIDE -eq 1 ] && [ $(( INIT + RUN + BACKGROUND + ONCE + VIEW + STOPIT )) -gt 0 ]; then echo "--guide stands alone. It only helps you choose flags (add -c, -d, -m if needed)."; exit 64; fi
@@ -829,14 +834,32 @@ finish_build() {
   echo
 }
 
-# ---------- -k: stop the background build ----------
+# Sends a signal to a process and everything it started, children first.
+kill_tree() { local c; for c in $(pgrep -P "$2" 2>/dev/null); do kill_tree "$1" "$c"; done; kill "-$1" "$2" 2>/dev/null; return 0; }
+
+# ---------- -k: stop the build after the run in progress finishes. --kill-now stops at once ----------
 if [ $STOPIT -eq 1 ]; then
   if alive "$LOCK" claude-build; then
-    pid=$(cat "$LOCK"); echo "stopping the build loop (pid $pid)"
-    pkill -TERM -P "$pid" 2>/dev/null; kill -TERM "$pid" 2>/dev/null
-    for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
-    kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
-    echo "stopped. Any task in progress stays todo and repeats on the next run."
+    pid=$(cat "$LOCK")
+    if [ $NOW -eq 0 ] && [ -f "$CURRENT" ]; then
+      # A run is in progress. Ask the loop to stop when it ends, so no work is thrown away.
+      mkdir -p "$LOG_DIR"; touch "$STOP"
+      IFS='|' read -r cs cn cm ce < "$CURRENT"; el=$(( $(date +%s) - cs ))
+      echo "${C_B}Stop requested.${C_N} The build will stop when the run in progress finishes."
+      echo "  Running now:  task $cn on $cm, effort $ce, for $(( el/60 ))m $(printf '%02d' $(( el%60 )))s"
+      echo "  What happens: the model finishes and commits its tasks, then the loop exits. A run can take a while; this keeps its work."
+      echo "  Watch it:     $(self_cmd) --watch"
+      echo "  Stop at once: ${C_C}$(self_cmd) --kill-now${C_N}   (the task in progress stays todo, and its files are left uncommitted)"
+      echo "  Changed your mind: rm $(proj_path "$STOP")"
+    else
+      echo "stopping the build loop (pid $pid) and everything it started"
+      kill_tree TERM "$pid"
+      for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+      kill -0 "$pid" 2>/dev/null && kill_tree KILL "$pid"
+      rm -f "$STOP" "$CURRENT"
+      if [ $NOW -eq 1 ]; then echo "stopped at once. Any task in progress stays todo and repeats on the next run. Check git status for files it left."
+      else echo "stopped. No run was in progress, so nothing was lost."; fi
+    fi
   else echo "Nothing is running for $PROJECT_NAME."; fi
   exit 0
 fi
@@ -959,10 +982,11 @@ style_lines() {
     -e "s/^( *)[-*] /\\1• /"
 }
 
-# QUIET_TOOLS=1 (config): on a terminal, look-around commands (reading files, grep, ls, and the like) are not printed one by one.
-# They become a single dim line that is overwritten as the model works. Default 0: every step is printed. The log always keeps every step.
+# -v on a terminal: look-around commands (reading files, grep, ls, and the like) are not printed one by one.
+# They become a single dim line that is overwritten as the model works, so you can see it is busy. -V (-vv) prints every step.
+# The log always keeps every step.
 tool_mark() {
-  if [ "${QUIET_TOOLS:-0}" -ne 1 ] || [ -z "$C_N" ]; then cat; return; fi
+  if [ "$VERBOSE" -ge 2 ] || [ -z "$C_N" ]; then cat; return; fi
   awk '
     function noisy(line,   t, name, cmd, n, seg, i, s) {
       if (line !~ /^[0-9][0-9]:[0-9][0-9]:[0-9][0-9]   [A-Za-z_]+: /) return 0
@@ -977,7 +1001,7 @@ tool_mark() {
     { if (noisy($0)) print "\001" $0; else print; fflush() }'
 }
 tool_ticker() {
-  if [ "${QUIET_TOOLS:-0}" -ne 1 ] || [ -z "$C_N" ]; then cat; return; fi
+  if [ "$VERBOSE" -ge 2 ] || [ -z "$C_N" ]; then cat; return; fi
   awk -v w="$(tput cols 2>/dev/null || echo 100)" '
     { if (substr($0, 1, 1) == "\001") { l = substr($0, 2); gsub(/\033\[[0-9;]*m/, "", l); printf "\r\033[2K\033[2m  … %s\033[0m", substr(l, 1, w - 6); shown = 1; fflush(); next }
       if (shown) { printf "\r\033[2K"; shown = 0 }
@@ -1057,6 +1081,7 @@ while true; do
     plan_run "$next"
     log_msg "running: next task $next on $RUN_MODEL, effort ${RUN_EFFORT:-default} ($done_n/$total done)"
     resume_build; rc=$?
+    [ -f "$STOP" ] && { log_msg "stop requested; the run finished, so stopping"; exit 0; }
     [ $rc -eq 1 ] && exit 1
     if [ $rc -eq 0 ]; then
       # A run that exits cleanly but finishes no task would repeat forever and burn tokens. Stop after two.
