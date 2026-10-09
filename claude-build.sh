@@ -15,6 +15,10 @@ VERSION="1.0.0"
 SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 ORIG_PWD="$PWD"
 NAME="$(basename "$0")"   # the name you typed, such as claude-build
+# Terminal colors, only when output is a terminal and NO_COLOR is not set. Empty strings otherwise, so logs stay plain.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  C_B=$'\033[1m'; C_D=$'\033[2m'; C_G=$'\033[32m'; C_Y=$'\033[33m'; C_R=$'\033[31m'; C_C=$'\033[36m'; C_N=$'\033[0m'
+else C_B=""; C_D=""; C_G=""; C_Y=""; C_R=""; C_C=""; C_N=""; fi
 from_cwd() { case "$1" in /*) readlink -m "$1" ;; *) readlink -m "$ORIG_PWD/$1" ;; esac; }   # path typed on the command line
 
 # ---------- defaults ----------
@@ -40,11 +44,15 @@ AFTER_RUN=30           # seconds to wait after a good run
 BACKOFF_STEPS=(3600 7200 14400 21600)   # waits after the 1st, 2nd, 3rd, 4th and later failures
 LOG_DIR=".build"
 REQUIRE_GIT=1
+GATE_MODE="stop"       # stop = a GATE row pauses the build. continue = record it for review and keep going (a GATE! row always stops)
+REPORT=1               # 1 = at every stop, write a report file and have a model explain it in plain words. 0 = report without the explanation
+REPORT_MODEL="sonnet"  # model that writes the plain-words explanation (one short call per stop)
+REPORT_EFFORT="low"
 STREAM=1               # 1 = log and show progress while a run works (needs jq). 0 = output appears when the run ends
 REDACT_FILES=(".env.local")
 CONFIG=""              # chosen below: -c, else ./claude-build.conf in the current folder, else the one beside this script
 CONFIG_GIVEN=0
-ONCE=0; RUN=0; VIEW=0; BACKGROUND=0; STOPIT=0; VERBOSE=0; INIT=0; ASK=0; GUIDE=0; WATCH=0; CHECK_UPDATE=0; UPDATE=0; POSITIONAL=()   # VIEW = status-only mode (-s), INIT = plan mode (--init), ASK = interactive plan mode (-I)
+ONCE=0; RUN=0; VIEW=0; BACKGROUND=0; STOPIT=0; VERBOSE=0; INIT=0; ASK=0; GUIDE=0; WATCH=0; READY=0; CHECK_UPDATE=0; UPDATE=0; POSITIONAL=()   # VIEW = status-only mode (-s), INIT = plan mode (--init), ASK = interactive plan mode (-I)
 
 # Bundled short flags: -rv is -r -v, and -vrc FILE is -v -r -c FILE. Letters that take a value must come last in a bundle.
 expand_flags() {
@@ -79,6 +87,7 @@ MODES
   no arguments        this help
   flags, no -r/-b/-o/-s   PREVIEW: shows the project, settings, and the exact prompt. Starts nothing
   -s                  status: print the last state and the end of the log (works after the build ended)
+  --ready             after a gate or block: change STATUS to ready in the state file (then start the build)
   --watch             status that refreshes every 5 seconds (WATCH_EVERY) until Ctrl+C. Run it in a second terminal
   -r                  really run, in this terminal. Quiet: a line per step
   -b                  really run, in the background, then return to the terminal
@@ -151,6 +160,7 @@ FLAGS  (a flag overrides the config file, which overrides the built-in default)
   -a, --after-run SECONDS    wait after a good run             [$AFTER_RUN]
   -l, --log-dir DIR          logs, lock, and stop file         [$LOG_DIR]
   -h, --help                 show this text
+      --ready                change STATUS from gate or blocked to ready, then you start the build
       --watch                like -s, redrawn every 5 seconds until Ctrl+C
       --guide                interactive help from Claude (asks before using tokens)
       --check-update         check GitHub for a newer release (the script never checks on its own)
@@ -279,6 +289,7 @@ while [ $# -gt 0 ]; do
     --init) INIT=1; shift ;;
     --guide) GUIDE=1; shift ;;
     --watch) VIEW=1; WATCH=1; shift ;;
+    --ready) READY=1; shift ;;
     --check-update) CHECK_UPDATE=1; shift ;;
     --update) UPDATE=1; shift ;;
     -I|--interactive) ASK=1; shift ;;
@@ -302,6 +313,7 @@ if [ $VIEW -eq 1 ] && [ $(( RUN + BACKGROUND + ONCE )) -gt 0 ]; then echo "-s (s
 if [ $GUIDE -eq 1 ] && [ $(( INIT + RUN + BACKGROUND + ONCE + VIEW + STOPIT )) -gt 0 ]; then echo "--guide stands alone. It only helps you choose flags (add -c, -d, -m if needed)."; exit 64; fi
 if [ $INIT -eq 1 ] && [ $(( BACKGROUND + ONCE + VIEW + STOPIT )) -gt 0 ]; then echo "--init cannot be combined with -b, -o, -s, or -k. Use --init alone to preview, or --init -r to write the state file."; exit 64; fi
 
+if [ $READY -eq 1 ] && [ $(( CHECK_UPDATE + UPDATE + GUIDE + INIT + RUN + BACKGROUND + ONCE + VIEW + STOPIT )) -gt 0 ]; then echo "--ready stands alone. It changes STATUS to ready, then you start the build."; exit 64; fi
 if [ $(( CHECK_UPDATE + UPDATE )) -gt 0 ] && [ $(( GUIDE + INIT + RUN + BACKGROUND + ONCE + VIEW + STOPIT + ASK )) -gt 0 -o $(( CHECK_UPDATE + UPDATE )) -gt 1 ]; then echo "--check-update and --update stand alone, one at a time."; exit 64; fi
 
 # ---------- --check-update and --update: the only network use. Nothing here runs unless you ask ----------
@@ -426,6 +438,8 @@ build_prompt() {
   case "$p" in *"{model_rule}"*) ;; *) [ -n "$rule" ] && p="$p {model_rule}" ;; esac
   p="${p//\{model_rule\}/$rule}"; p="${p//\{model\}/$RUN_MODEL}"; p="${p//\{effort\}/${RUN_EFFORT:-default}}"
   p="${p//\{state_file\}/$STATE_FILE}"; p="${p//\{tasks_per_run\}/$TASKS_PER_RUN}"; p="${p//\{context\}/$ctx}"
+  # Always added: tells the model how to end a run at a gate or a stop, so the person knows what to do.
+  p="$p When you stop at a gate or a stop condition, write the Notes cell of that row and your final message for a person who has not read the planning files. Spell out any code name (a milestone id, a gate id, a spike) in a few plain words. Say what was built, what you want checked, the full path of each file to open, what a correct result looks like, and what to do if it is wrong. The exact edit that continues the build is in ${STATE_FILE}: change STATUS: gate to STATUS: ready. Do not end with a recommendation alone."
   printf '%s' "$p"
 }
 
@@ -436,6 +450,23 @@ claude_args() {
   [ ${#ALLOWED_TOOLS[@]} -gt 0 ] && { printf '%s\0' --allowedTools; printf '%s\0' "${ALLOWED_TOOLS[@]}"; }
   [ ${#EXTRA_CLAUDE_ARGS[@]} -gt 0 ] && printf '%s\0' "${EXTRA_CLAUDE_ARGS[@]}"
 }
+
+# ---------- --ready: make the one-line edit that lets a paused build continue ----------
+if [ $READY -eq 1 ]; then
+  st="$(state STATUS)"
+  case "$st" in
+    ready) echo "STATUS is already ready in $(proj_path "$STATE_FILE"). Start the build: $(self_cmd) -rv"; exit 0 ;;
+    done)  echo "The build is complete (STATUS: done). Nothing to continue."; exit 0 ;;
+    gate|blocked) ;;
+    *) echo "STATUS is '$st', which is not gate or blocked. Edit $(proj_path "$STATE_FILE") by hand."; exit 64 ;;
+  esac
+  ln="$(grep -n '^STATUS:' "$STATE_FILE" | head -n 1 | cut -d: -f1)"
+  [ "$st" = blocked ] && echo "Cleared BLOCKED_REASON. It said: $(state BLOCKED_REASON)"
+  sed -i 's|^STATUS:.*|STATUS: ready|; s|^BLOCKED_REASON:.*|BLOCKED_REASON:|' "$STATE_FILE"
+  echo "Changed line $ln of $(proj_path "$STATE_FILE"):  STATUS: $st  ->  STATUS: ready"
+  echo "Start the build again (runs here, shows each step, continues at task $(state NEXT)): $(self_cmd) -rv"
+  exit 0
+fi
 
 # ---------- --init: have a model draft the state file from your plan (a preview unless -r is given) ----------
 init_prompt() {
@@ -596,6 +627,177 @@ if [ $GUIDE -eq 1 ]; then
   exec "$CLAUDE_BIN" "${gcmd[@]}"
 fi
 
+# ---------- the handoff report: written whenever the build stops, so the next step is clear ----------
+# Rows still todo whose Task starts with GATE: "id|task".
+open_gates() {
+  state_table | awk -F'|' '
+    function trim(s){gsub(/^[ \t]+|[ \t]+$/,"",s);return s}
+    !hdr && /^\|[ \t]*Id[ \t]*\|/ { for(i=2;i<NF;i++){c=tolower(trim($i)); if(c=="status")sc=i; if(c=="task")tc=i}; hdr=1; next }
+    hdr && /^\|[ \t:-]+\|/ && !seen { seen=1; next }
+    hdr && /^\|/ { if (tolower(trim($sc))=="todo" && trim($tc) ~ /^GATE/) printf "%s|%s\n", trim($2), trim($tc); next }
+    hdr && !/^\|/ { exit }' | show_cell
+}
+# Rows still todo that carry notes (a task that failed or was handed to a stronger model): "id|notes".
+problem_rows() {
+  state_table | awk -F'|' '
+    function trim(s){gsub(/^[ \t]+|[ \t]+$/,"",s);return s}
+    !hdr && /^\|[ \t]*Id[ \t]*\|/ { for(i=2;i<NF;i++){c=tolower(trim($i)); if(c=="status")sc=i; if(c=="notes")nc=i; if(c=="task")tc=i}; hdr=1; next }
+    hdr && /^\|[ \t:-]+\|/ && !seen { seen=1; next }
+    hdr && /^\|/ { if (nc && tolower(trim($sc))=="todo" && trim($nc)!="" && trim($2) !~ /^G/ && !(tc && trim($tc) ~ /^GATE/)) printf "%s|%s\n", trim($2), trim($nc); next }
+    hdr && !/^\|/ { exit }' | show_cell
+}
+total_cost() { [ -f "$LOG_DIR/costs.tsv" ] && awk '{s+=$2} END{printf "%.2f", s}' "$LOG_DIR/costs.tsv"; }
+hard_gate_now() { local id task; IFS='|' read -r id task <<< "$(recent_done 1)"; case "$task" in GATE!*) return 0 ;; esac; return 1; }
+# GATE_MODE=continue: note the gate for later review, clear it, and let the build go on.
+soft_gate_pass() {
+  local id task notes; IFS='|' read -r id task <<< "$(recent_done 1)"; notes="$(task_cell "$id" Notes)"
+  mkdir -p "$LOG_DIR"; printf '%s\t%s\t%s\t%s\n' "$(date '+%Y-%m-%d %H:%M')" "$id" "$task" "$notes" >> "$LOG_DIR/review-items.tsv"
+  sed -i 's|^STATUS:.*|STATUS: ready|' "$STATE_FILE"
+  log_msg "passed gate ${id} without stopping (GATE_MODE=continue). It is recorded for review in the report"
+}
+# The one-line result, in plain words.
+report_sentence() {
+  local done_n total; read -r done_n total <<< "$(task_counts)"
+  case "$1" in
+    gate)    echo "The build paused for your review after $done_n of $total tasks." ;;
+    blocked) echo "The build stopped after $done_n of $total tasks because it could not continue on its own." ;;
+    done)    echo "The build finished: all $total tasks are done." ;;
+  esac
+}
+# What to paste into Claude Code to work on this by hand.
+manual_prompt() {
+  local ctx=""; [ ${#CONTEXT_FILES[@]} -gt 0 ] && ctx=" and the files it points to (${CONTEXT_FILES[*]})"
+  echo "Read CLAUDE.md and ${STATE_FILE}${ctx}. An unattended build run by claude-build has stopped. $(report_sentence "$1")$([ "$1" = blocked ] && echo " Reason: $(state BLOCKED_REASON).") Explain in plain words what was built and what stopped it, and what I need to check or decide. Then help me do it. Do not start the next task in ${STATE_FILE} until I say so. When we are done, set STATUS: ready in ${STATE_FILE} so the automatic build can continue."
+}
+# Asks a model for a plain-words explanation, written for someone who has not read the planning documents.
+report_plain() {
+  [ "$REPORT" -eq 1 ] || return 0
+  command -v "$CLAUDE_BIN" >/dev/null 2>&1 || return 0
+  local last="" id task notes done_n total
+  read -r done_n total <<< "$(task_counts)"; IFS='|' read -r id task <<< "$(recent_done 1)"; notes="$(task_cell "$id" Notes)"
+  if [ -f "$LOG_DIR/last-run.jsonl" ] && command -v jq >/dev/null 2>&1; then
+    last="$(jq -Rr 'fromjson? | select(.type=="assistant") | .message.content[]? | select(.type=="text") | .text' "$LOG_DIR/last-run.jsonl" 2>/dev/null | tail -c 3500)"
+  fi
+  local prompt
+  prompt="You are writing the handoff note for a person who has NOT read the project's planning documents. An unattended software build has stopped. Explain it in plain language. Define any code name (a milestone id like M1, a gate id like G1, words like spike) in a few plain words the first time you use it. No jargon without a definition. Do not repeat the raw task text.
+
+Write exactly these parts, as short Markdown, under 250 words in all:
+1. What was built so far (2 to 4 bullets).
+2. Why the build stopped.
+3. What you need to do, as numbered steps. Name every file to open with its full path (project folder: $(pwd)), say what a correct result looks like, and say what to do if it is wrong.
+4. How to continue: in ${STATE_FILE}, change the line STATUS: $1 to STATUS: ready, then run the build again.
+
+FACTS
+- Result: $(report_sentence "$1")
+- Blocked reason: $(state BLOCKED_REASON)
+- Latest finished task: ${id} ${task}
+- Notes on that task: ${notes}
+- Most recent finished tasks: $(recent_done 8 | tr '\n' ';')
+- Recent commits: $(git log --oneline -n 8 2>/dev/null | tr '\n' ';')
+- The model's last message in the final run: ${last}"
+  timeout 180 "$CLAUDE_BIN" -p "$prompt" --model "$REPORT_MODEL" ${REPORT_EFFORT:+--effort "$REPORT_EFFORT"} --max-turns 1 --output-format text 2>>"$LOG"
+}
+# The steps to restart after a gate or a block, in words and exact edits. $1 = gate or blocked, $2 = term or md.
+continue_steps() {
+  local kind="$1" fmt="$2" ln next title b="" c="" n="" cmd
+  ln="$(grep -n '^STATUS:' "$STATE_FILE" | head -n 1 | cut -d: -f1)"; next="$(state NEXT)"; title="$(task_cell "$next" Task)"; cmd="$(self_cmd)"
+  if [ "$fmt" = term ]; then b="$C_B"; n="$C_N"; c="$C_C"; fi
+  local code_open="" code_close=""; [ "$fmt" = md ] && { code_open='`'; code_close='`'; }
+  echo "${b}Step 1. Change one line in the state file${n}"
+  echo "  File: $(proj_path "$STATE_FILE")   (line ${ln:-?}, near the top)"
+  echo "  Now:     ${code_open}STATUS: $kind${code_close}"
+  echo "  Change:  ${code_open}STATUS: ready${code_close}"
+  [ "$kind" = blocked ] && echo "  Also clear the text after ${code_open}BLOCKED_REASON:${code_close} on the next lines, once the cause is fixed."
+  echo "  Shortcut: run ${c}$cmd --ready${n} and it makes this edit for you."
+  echo
+  echo "${b}Step 2. Start the build again${n}"
+  echo "  Command: ${c}$cmd -rv${n}"
+  echo "  What it does: runs in this terminal and shows each step as it works. It picks up at task ${next:-?}${title:+ ($(echo "$title" | cut -c1-80))}, keeps going, and stops at the next review point or problem, with a new report."
+  echo "  To run it in the background instead, use ${c}-b${n} in place of ${c}-rv${n}, and watch it with ${c}$cmd --watch${n}."
+}
+# Writes the report file and prints the summary. $1 = gate, blocked, or done.
+finish_build() {
+  local kind="$1" done_n total stamp file plain id task notes line cost
+  read -r done_n total <<< "$(task_counts)"
+  mkdir -p "$LOG_DIR"; stamp="$(date '+%Y-%m-%d-%H%M')"; file="$LOG_DIR/report-$stamp.md"
+  echo "${C_D}Writing the report...${C_N}"
+  plain="$(report_plain "$kind")"
+  IFS='|' read -r id task <<< "$(recent_done 1)"; notes="$(task_cell "$id" Notes)"; cost="$(total_cost)"
+  {
+    echo "# $PROJECT_NAME build report"
+    echo
+    echo "Written $(date '+%Y-%m-%d %H:%M'). $(report_sentence "$kind")"
+    echo
+    echo "## In plain words"
+    echo
+    if [ -n "$plain" ]; then echo "$plain"
+    else
+      case "$kind" in
+        gate)    echo "The build reached a review point${id:+ ($id)}: $task"; [ -n "$notes" ] && { echo; echo "What it left for you: $notes"; } ;;
+        blocked) echo "Reason: $(state BLOCKED_REASON)" ;;
+        done)    echo "Every task in $STATE_FILE is marked done. Nothing was deployed or pushed." ;;
+      esac
+    fi
+    echo
+    echo "## What to do next"
+    echo
+    case "$kind" in
+      gate|blocked)
+        if [ "$kind" = gate ]; then echo "First, do the review described above."; else echo "First, fix the cause described above, or change the plan or the task table."; fi
+        echo; continue_steps "$kind" md | sed -e 's/^Step \([12]\)\. \(.*\)$/**Step \1. \2**/' -e 's/^  \(.\)/- \1/' ;;
+      done)    echo "1. Look at what was built: \`git log --oneline\` in $(pwd)."
+               echo "2. The build never deploys or pushes. Do that yourself when you are satisfied." ;;
+    esac
+    if [ -s "$LOG_DIR/review-items.tsv" ]; then
+      echo; echo "## Review points the build passed without stopping"; echo
+      echo "These were marked as review points. The build recorded them and kept going (GATE_MODE=continue). Check them when you can."; echo
+      while IFS=$'\t' read -r when rid rtask rnotes; do echo "- **$rid** ($when): $rtask${rnotes:+ Notes: $rnotes}"; done < "$LOG_DIR/review-items.tsv"
+    fi
+    if [ -n "$(problem_rows)" ]; then
+      echo; echo "## Tasks that had trouble"; echo
+      problem_rows | while IFS='|' read -r pid pnotes; do echo "- **$pid**: $pnotes"; done
+    fi
+    echo; echo "## What was built (latest tasks)"; echo
+    recent_done 10 | while IFS='|' read -r rid rtask; do c="$(task_cell "$rid" Commit)"; echo "- $rid: $rtask${c:+ (commit $c)}"; done
+    echo; echo "## What is left"; echo
+    echo "- $(( total - done_n )) of $total tasks, next: $(state NEXT)"
+    if [ -n "$(open_gates)" ]; then echo "- Review points still ahead: $(open_gates | cut -d'|' -f1 | tr '\n' ' ')"; fi
+    [ -n "$cost" ] && { echo; echo "## Cost"; echo; echo "About \$$cost reported by the runs so far."; }
+    echo; echo "## Manual mode (Claude Code in VS Code, VSCodium, or the terminal)"; echo
+    echo "To finish this by hand, or to fix what stopped the build:"; echo
+    echo "- **VS Code or VSCodium** with the Claude Code extension: open the folder \`$(pwd)\`, open the Claude panel, and paste the prompt below."
+    echo "- **Terminal**: \`cd $(pwd) && claude\`, then paste the prompt below."
+    echo; echo "Prompt to paste:"; echo
+    echo '```'; manual_prompt "$kind"; echo '```'
+    echo; echo "## Recent commits"; echo; echo '```'; git log --oneline -n 10 2>/dev/null; echo '```'
+  } > "$file"
+  cp "$file" "$LOG_DIR/report-latest.md"
+  # Terminal summary
+  echo
+  case "$kind" in
+    gate)    echo "${C_Y}${C_B}== PAUSED FOR REVIEW: $done_n of $total tasks done ==${C_N}" ;;
+    blocked) echo "${C_R}${C_B}== STOPPED, NEEDS YOU: $done_n of $total tasks done ==${C_N}" ;;
+    done)    echo "${C_G}${C_B}== BUILD COMPLETE: $total of $total tasks done ==${C_N}" ;;
+  esac
+  echo
+  if [ -n "$plain" ]; then echo "$plain" | style_lines | sed 's/^/  /'
+  else echo "  $(report_sentence "$kind")"; fi
+  echo
+  case "$kind" in
+    gate|blocked)
+      continue_steps "$kind" term
+      echo
+      echo "${C_B}Or work on it by hand${C_N}"
+      echo "  Open $(pwd) in VS Code or VSCodium with the Claude Code extension (or run: cd $(pwd) && claude)."
+      echo "  The report has a prompt to paste." ;;
+    done) echo "${C_B}Next${C_N}"; echo "  Review the commits (git log). The build never deploys or pushes." ;;
+  esac
+  echo
+  echo "${C_B}Full report:${C_N} $(proj_path "$file")"
+  echo "             $(proj_path "$LOG_DIR/report-latest.md") (always the latest)"
+  echo
+}
+
 # ---------- -k: stop the background build ----------
 if [ $STOPIT -eq 1 ]; then
   if alive "$LOCK" claude-build; then
@@ -612,9 +814,10 @@ fi
 show_state() {
   local done_n total next status reason nrow rd i t
   read -r done_n total <<< "$(task_counts)"; next=$(state NEXT); status=$(state STATUS); reason=$(state BLOCKED_REASON)
-  echo "$PROJECT_NAME build"
-  if alive "$LOCK" claude-build; then echo "  build loop: running (pid $(cat "$LOCK"))"; else echo "  build loop: not running"; fi
-  echo "  status:     ${status:-unknown}${reason:+ ($reason)}"
+  local sc="$C_N"; case "$status" in ready|done) sc="$C_G" ;; gate) sc="$C_Y" ;; blocked) sc="$C_R" ;; esac
+  echo "${C_B}$PROJECT_NAME build${C_N}"
+  if alive "$LOCK" claude-build; then echo "  build loop: ${C_G}running${C_N} (pid $(cat "$LOCK"))"; else echo "  build loop: not running"; fi
+  echo "  status:     ${sc}${status:-unknown}${C_N}${reason:+ ($reason)}"
   if [ -f "$BACKOFF" ] && [ "$(date +%s)" -lt "$(cat "$BACKOFF")" ]; then echo "  waiting:    until $(date -d @"$(cat "$BACKOFF")" '+%H:%M') after a failed run"; fi
   nrow=$(state_table | awk -F'|' -v id="$next" 'function trim(s){gsub(/^[ \t]+|[ \t]+$/,"",s);return s} /^\|[ \t]*Id[ \t]*\|/{for(i=2;i<NF;i++)if(tolower(trim($i))=="task")tc=i;h=1;next} h&&trim($2)==id{print trim($tc);exit}' | show_cell)
   echo "  next:       ${next:--}${nrow:+  $nrow}"
@@ -710,6 +913,19 @@ spinner() {
 SPIN_PID=""
 stop_spinner() { [ -n "$SPIN_PID" ] && { kill "$SPIN_PID" 2>/dev/null; wait "$SPIN_PID" 2>/dev/null; SPIN_PID=""; printf '\r\033[2K\033[?25h' >&2; }; return 0; }
 
+# Turns the markdown in the model's messages into terminal formatting. Terminal only: the log stays plain text.
+style_lines() {
+  if [ -z "$C_N" ]; then cat; return; fi
+  sed -u -E \
+    -e "s/^([0-9]{2}:[0-9]{2}:[0-9]{2}) {3}([A-Za-z_]+): (.*)\$/${C_D}\\1${C_N}   ${C_Y}\\2${C_N}: ${C_D}\\3${C_N}/" \
+    -e "s/^([0-9]{2}:[0-9]{2}:[0-9]{2}) claude: /${C_D}\\1${C_N} ${C_G}claude${C_N}: /" \
+    -e "s/^([0-9]{2}:[0-9]{2}:[0-9]{2}) (run result: .*)\$/${C_D}\\1${C_N} ${C_B}\\2${C_N}/" \
+    -e "s/^#+ (.*)\$/${C_B}\\1${C_N}/" \
+    -e "s/\\*\\*([^*]+)\\*\\*/${C_B}\\1${C_N}/g" \
+    -e "s/\`([^\`]+)\`/${C_C}\\1${C_N}/g" \
+    -e "s/^( *)[-*] /\\1• /"
+}
+
 # Turns Claude's stream-json lines into one readable line per step: what the model says, and each tool it uses.
 progress_lines() {
   jq -Rr --unbuffered '
@@ -718,7 +934,7 @@ progress_lines() {
     | if ($e | type) == "string" then $t + " " + $e
       elif $e.type == "assistant" then
         $e.message.content[]?
-        | if .type == "text" then $t + " claude: " + (.text | gsub("\\s+"; " ") | .[0:400])
+        | if .type == "text" then $t + " claude: " + (.text | sub("^\\s+"; "") | sub("\\s+$"; "") | .[0:4000])
           elif .type == "tool_use" then $t + "   " + .name + ": " + ((.input.command // .input.file_path // .input.pattern // .input.path // "") | tostring | gsub("\\s+"; " ") | .[0:160])
           else empty end
       elif $e.type == "result" then $t + " run result: " + ($e.subtype // "") + ", " + (($e.num_turns // 0) | tostring) + " turns, $" + ((($e.total_cost_usd // 0) * 10000 | round / 10000) | tostring) + (if $e.is_error then " (error: " + (($e.result // "") | .[0:200]) + ")" else "" end)
@@ -737,7 +953,7 @@ resume_build() {
     # Progress while the run works. The raw stream is kept in LOG_DIR/last-run.jsonl.
     OUT_FORMAT=stream-json; cmd=(); while IFS= read -r -d '' a; do cmd+=("$a"); done < <(claude_args)
     if [ $VERBOSE -eq 1 ]; then
-      timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" 2>&1 | tee "$LOG_DIR/last-run.jsonl" | progress_lines | tee -a "$LOG"; code=${PIPESTATUS[0]}
+      timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" 2>&1 | tee "$LOG_DIR/last-run.jsonl" | progress_lines | tee -a "$LOG" | style_lines; code=${PIPESTATUS[0]}
     else
       timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" 2>&1 | tee "$LOG_DIR/last-run.jsonl" | progress_lines >> "$LOG"; code=${PIPESTATUS[0]}
     fi
@@ -747,6 +963,10 @@ resume_build() {
     timeout "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" >> "$LOG" 2>&1; code=$?
   fi
   stop_spinner; rm -f "$CURRENT"
+  if [ "$STREAM" -eq 1 ] && command -v jq >/dev/null 2>&1 && [ -f "$LOG_DIR/last-run.jsonl" ]; then
+    local c; c="$(jq -Rr 'fromjson? | select(.type=="result") | .total_cost_usd // empty' "$LOG_DIR/last-run.jsonl" 2>/dev/null | tail -n 1)"
+    [ -n "$c" ] && printf '%s %s\n' "$(date +%s)" "$c" >> "$LOG_DIR/costs.tsv"
+  fi
   if [ $code -ne 0 ]; then
     local n=$(( $(cat "$FAILS" 2>/dev/null || echo 0) + 1 )) idx wait
     echo $n > "$FAILS"; idx=$(( n-1 )); [ $idx -ge ${#BACKOFF_STEPS[@]} ] && idx=$(( ${#BACKOFF_STEPS[@]} - 1 ))
@@ -765,9 +985,10 @@ while true; do
   [ -f "$STOP" ] && { log_msg "stop file found"; exit 0; }
   status=$(state STATUS); next=$(state NEXT); read -r done_n total <<< "$(task_counts)"
   case "$status" in
-    done)    log_msg "build complete ($done_n/$total tasks)"; exit 0 ;;
-    blocked) log_msg "BLOCKED: $(state BLOCKED_REASON). Fix it, then set STATUS: ready"; exit 2 ;;
-    gate)    log_msg "at a gate ($done_n/$total done). Review, then set STATUS: ready"; exit 3 ;;
+    done)    log_msg "build complete ($done_n/$total tasks)"; finish_build done; exit 0 ;;
+    blocked) log_msg "BLOCKED: $(state BLOCKED_REASON). Fix it, then set STATUS: ready"; finish_build blocked; exit 2 ;;
+    gate)    if [ "$GATE_MODE" = continue ] && ! hard_gate_now; then soft_gate_pass; NO_PROGRESS=0; continue; fi
+             log_msg "at a gate ($done_n/$total done). Review, then set STATUS: ready"; finish_build gate; exit 3 ;;
     ready)   ;;
     *)       log_msg "unknown STATUS '$status' in $STATE_FILE"; exit 64 ;;
   esac
@@ -787,7 +1008,7 @@ while true; do
         if [ $NO_PROGRESS -ge 2 ]; then
           reason="Two runs finished without completing a task. See $LOG."; reason=${reason//\\/\\\\}; reason=${reason//&/\\&}; reason=${reason//|/\\|}
           sed -i "s|^STATUS:.*|STATUS: blocked|; s|^BLOCKED_REASON:.*|BLOCKED_REASON: $reason|" "$STATE_FILE"
-          log_msg "BLOCKED: two runs made no progress. See $LOG"; exit 2
+          log_msg "BLOCKED: two runs made no progress. See $LOG"; finish_build blocked; exit 2
         fi
       else NO_PROGRESS=0; fi
       [ "$ONCE" -eq 0 ] && { sleep "$AFTER_RUN" & wait $!; continue; }

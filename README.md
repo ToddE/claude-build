@@ -345,7 +345,7 @@ claude-build -c blog.conf --watch
 ```
 
 #### `-v`, `--verbose`
-A modifier, not a mode. With a preview, `-v` prints the state report before the settings and prompt. With `-r` or `-o`, it prints the state report first and shows progress in the terminal as the run works, one line per step: what the model says and each tool it uses, with a time. The same lines are written to the log in every mode, so `tail -f .build/build.log` follows a run even without `-v`. This needs `jq`. Without `jq`, the model's output appears only when each run ends. The raw stream of the latest run is kept in `.build/last-run.jsonl`. Set `STREAM=0` in the config to turn live progress off. With `-b` the state report is printed before backgrounding, and the background copy does not echo to the terminal. Follow it with `tail -f`.
+A modifier, not a mode. With a preview, `-v` prints the state report before the settings and prompt. With `-r` or `-o`, it prints the state report first and shows progress in the terminal as the run works, one line per step: what the model says and each tool it uses, with a time. The model's markdown (bold, code, headings, bullets) is shown as terminal formatting, and the log keeps plain text. Set `NO_COLOR=1` to turn the formatting off. The same lines are written to the log in every mode, so `tail -f .build/build.log` follows a run even without `-v`. This needs `jq`. Without `jq`, the model's output appears only when each run ends. The raw stream of the latest run is kept in `.build/last-run.jsonl`. Set `STREAM=0` in the config to turn live progress off. With `-b` the state report is printed before backgrounding, and the background copy does not echo to the terminal. Follow it with `tail -f`.
 ```
 claude-build -v -c blog.conf                  verbose preview
 claude-build -v -c blog.conf -r               verbose run
@@ -686,9 +686,68 @@ log, last 15 lines (/home/you/project/.build/build.log):
 
 ### A gate in practice
 
-1. A run reaches a milestone gate and sets `STATUS: gate`. The loop prints "at a gate" and exits with code 3.
-2. You review the work and the commits.
+1. A run reaches a milestone gate and sets `STATUS: gate`. The script prints a summary and exits with code 3. The summary is written by the script, not by the model, so it always says the same things:
+
+   ```
+   == GATE (G1) reached: 15 of 66 tasks done ==
+   Gate:
+     Report PDF spike results and wait for review
+   What the build left for you:
+     <the Notes cell of that row>
+   To continue:
+     1. Do the review above. The last messages in the log say what to check: <log path>
+     2. Open <state file> and change STATUS: gate to STATUS: ready.
+     3. Run: claude-build -c <config> -rv
+   ```
+2. You review the work and the commits. The model is also told to end a gate with a message that names each file to open, what a correct result looks like, and the edit that continues the build. That message is in the log (`tail -n 40 .build/build.log`).
 3. Set `STATUS: ready` and start again.
+
+A block (`STATUS: blocked`) prints the same kind of summary with the reason.
+
+### The handoff report
+
+The aim is for the build to go as far as it can and then tell you, in plain words, what happened and what to do. Whenever the build stops because of a gate, a block, or completion, the script writes a report and prints a summary:
+
+- **Files:** `.build/report-YYYY-MM-DD-HHMM.md`, and `.build/report-latest.md` (always the newest).
+- **In plain words:** one short call to `REPORT_MODEL` (default `sonnet`, low effort) explains what was built, why it stopped, and what you need to do, for a person who has not read the planning files. It defines code names such as milestone and gate ids and names each file to open with its full path. Set `REPORT=0` to skip the call and use the task notes.
+- **What to do next:** the exact edit (`STATUS: gate` to `STATUS: ready`) and the command to restart.
+- **Review points passed, tasks that had trouble, what was built, what is left, and cost:** deterministic lists from the state file and the run logs. Cost is the total the runs reported.
+- **Manual mode:** how to finish by hand with Claude Code in VS Code, VSCodium (with the Claude Code extension), or the terminal, plus a prompt to paste that gives Claude the situation.
+
+**The restart steps** are spelled out in the terminal summary and in the report: the file and line number to edit, the line as it is now and as it should be, a shortcut command, and what the restart command does. For example:
+
+```
+Step 1. Change one line in the state file
+  File: /home/you/project/BUILD_STATE.md   (line 5, near the top)
+  Now:     STATUS: gate
+  Change:  STATUS: ready
+  Shortcut: run claude-build -c claude-build.conf --ready and it makes this edit for you.
+
+Step 2. Start the build again
+  Command: claude-build -c claude-build.conf -rv
+  What it does: runs in this terminal and shows each step as it works. It picks up at task 2.1 (...), keeps going, and stops at the next review point or problem, with a new report.
+  To run it in the background instead, use -b in place of -rv, and watch it with claude-build -c claude-build.conf --watch.
+```
+
+`--ready` is the shortcut. It changes `STATUS: gate` or `STATUS: blocked` to `STATUS: ready` (and clears `BLOCKED_REASON`), prints the line it changed, and starts nothing. It does not review anything for you, so use it after you have done the review.
+
+**Keep going past review points.** By default a `GATE` row stops the build. Set `GATE_MODE="continue"` in the config and a `GATE` row is recorded as a review point and the build carries on. The report lists the review points at the end. A row that starts with `GATE!` always stops, so use it for a decision that later work depends on.
+
+```
+== PAUSED FOR REVIEW: 15 of 66 tasks done ==
+
+  What was built: the workspace and a test that fills in a W-9 form ...
+  Why it stopped: the build wants a person to look at the filled form ...
+  1. Open /home/you/project/tests/output/w9-render-sample.png ...
+
+To continue automatically
+  Edit .../BUILD_STATE.md: change STATUS: gate to STATUS: ready, then run: claude-build -c ... -rv
+To work on it by hand
+  Open the project in VS Code or VSCodium with the Claude Code extension (or run: cd ... && claude).
+  The report has a prompt to paste.
+
+Full report: .../.build/report-2026-10-08-2217.md
+```
 
 ## 8. Running unattended
 
