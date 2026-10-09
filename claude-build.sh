@@ -455,16 +455,39 @@ claude_args() {
 if [ $READY -eq 1 ]; then
   st="$(state STATUS)"
   case "$st" in
-    ready) echo "STATUS is already ready in $(proj_path "$STATE_FILE"). Start the build: $(self_cmd) -rv"; exit 0 ;;
-    done)  echo "The build is complete (STATUS: done). Nothing to continue."; exit 0 ;;
+    ready)
+      echo "Nothing to change: STATUS is already ${C_G}ready${C_N} in $(proj_path "$STATE_FILE"). The build is allowed to run."
+      echo
+      if alive "$LOCK" claude-build; then
+        echo "${C_B}A build is already running${C_N} (pid $(cat "$LOCK")). It continues by itself."
+        echo "  Watch it:  ${C_C}$(self_cmd) --watch${C_N}"
+        echo "  Its log:   tail -f $(proj_path "$LOG")"
+        echo "  Stop it:   ${C_C}$(self_cmd) -k${C_N}"
+      else
+        echo "No build is running right now."
+        echo
+        start_block "Next: start the build" term
+        [ -f "$LOG_DIR/report-latest.md" ] && { echo; echo "The report from the last stop is in $(proj_path "$LOG_DIR/report-latest.md")"; }
+      fi
+      exit 0 ;;
+    done)
+      echo "The build is complete (STATUS: done), so there is nothing to continue."
+      echo
+      echo "${C_B}Next${C_N}"
+      echo "  Review what was built: git log --oneline (in $(pwd))"
+      [ -f "$LOG_DIR/report-latest.md" ] && echo "  The report: $(proj_path "$LOG_DIR/report-latest.md")"
+      echo "  The build never deploys or pushes. Do that yourself when you are satisfied."
+      echo "  To add more work, add rows to the task table, set NEXT to the first new row, and set STATUS: ready."
+      exit 0 ;;
     gate|blocked) ;;
-    *) echo "STATUS is '$st', which is not gate or blocked. Edit $(proj_path "$STATE_FILE") by hand."; exit 64 ;;
+    *) echo "STATUS is '$st', which is not gate, blocked, ready, or done. Edit $(proj_path "$STATE_FILE") by hand: the line near the top must read STATUS: ready."; exit 64 ;;
   esac
   ln="$(grep -n '^STATUS:' "$STATE_FILE" | head -n 1 | cut -d: -f1)"
   [ "$st" = blocked ] && echo "Cleared BLOCKED_REASON. It said: $(state BLOCKED_REASON)"
   sed -i 's|^STATUS:.*|STATUS: ready|; s|^BLOCKED_REASON:.*|BLOCKED_REASON:|' "$STATE_FILE"
   echo "Changed line $ln of $(proj_path "$STATE_FILE"):  STATUS: $st  ->  STATUS: ready"
-  echo "Start the build again (runs here, shows each step, continues at task $(state NEXT)): $(self_cmd) -rv"
+  echo
+  start_block "Next: start the build" term
   exit 0
 fi
 
@@ -697,6 +720,16 @@ FACTS
 - The model's last message in the final run: ${last}"
   timeout 180 "$CLAUDE_BIN" -p "$prompt" --model "$REPORT_MODEL" ${REPORT_EFFORT:+--effort "$REPORT_EFFORT"} --max-turns 1 --output-format text 2>>"$LOG"
 }
+# Says how to start the build and what that does. $1 = heading, $2 = term or md.
+start_block() {
+  local next title b="" c="" n="" cmd
+  next="$(state NEXT)"; title="$(task_cell "$next" Task)"; cmd="$(self_cmd)"
+  if [ "$2" = term ]; then b="$C_B"; n="$C_N"; c="$C_C"; fi
+  echo "${b}$1${n}"
+  echo "  Command: ${c}$cmd -rv${n}"
+  echo "  What it does: runs in this terminal and shows each step as it works. It picks up at task ${next:-?}${title:+ ($(echo "$title" | cut -c1-80))}, keeps going, and stops at the next review point or problem, with a new report."
+  echo "  To run it in the background instead, use ${c}-b${n} in place of ${c}-rv${n}, and watch it with ${c}$cmd --watch${n}."
+}
 # The steps to restart after a gate or a block, in words and exact edits. $1 = gate or blocked, $2 = term or md.
 continue_steps() {
   local kind="$1" fmt="$2" ln next title b="" c="" n="" cmd
@@ -710,10 +743,7 @@ continue_steps() {
   [ "$kind" = blocked ] && echo "  Also clear the text after ${code_open}BLOCKED_REASON:${code_close} on the next lines, once the cause is fixed."
   echo "  Shortcut: run ${c}$cmd --ready${n} and it makes this edit for you."
   echo
-  echo "${b}Step 2. Start the build again${n}"
-  echo "  Command: ${c}$cmd -rv${n}"
-  echo "  What it does: runs in this terminal and shows each step as it works. It picks up at task ${next:-?}${title:+ ($(echo "$title" | cut -c1-80))}, keeps going, and stops at the next review point or problem, with a new report."
-  echo "  To run it in the background instead, use ${c}-b${n} in place of ${c}-rv${n}, and watch it with ${c}$cmd --watch${n}."
+  start_block "Step 2. Start the build again" "$fmt"
 }
 # Writes the report file and prints the summary. $1 = gate, blocked, or done.
 finish_build() {
