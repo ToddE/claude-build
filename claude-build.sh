@@ -19,6 +19,8 @@ NAME="$(basename "$0")"   # the name you typed, such as claude-build
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   C_B=$'\033[1m'; C_D=$'\033[2m'; C_G=$'\033[32m'; C_Y=$'\033[33m'; C_R=$'\033[31m'; C_C=$'\033[36m'; C_N=$'\033[0m'
 else C_B=""; C_D=""; C_G=""; C_Y=""; C_R=""; C_C=""; C_N=""; fi
+# Terminal size as "rows cols", read from the terminal itself (tput inside a pipe or $(...) cannot see the window).
+term_size() { local sz; sz="$(stty size < /dev/tty 2>/dev/null)"; case "$sz" in [0-9]*" "[0-9]*) echo "$sz" ;; *) echo "${LINES:-24} ${COLUMNS:-80}" ;; esac; }
 from_cwd() { case "$1" in /*) readlink -m "$1" ;; *) readlink -m "$ORIG_PWD/$1" ;; esac; }   # path typed on the command line
 
 # ---------- defaults ----------
@@ -317,8 +319,9 @@ fi
 if [ $(( RUN + BACKGROUND + ONCE )) -gt 1 ]; then echo "Choose one of -r (run here), -b (run in the background), or -o (one cycle)."; exit 64; fi
 if [ $STOPIT -eq 1 ] && [ $(( RUN + BACKGROUND + ONCE + VIEW )) -gt 0 ]; then echo "-k and --kill-now (stop) cannot be combined with -r, -b, -o, or -s."; exit 64; fi
 RUNWATCH=0; [ $WATCH -eq 1 ] && [ $RUN -eq 1 ] && [ $(( BACKGROUND + ONCE )) -eq 0 ] && RUNWATCH=1   # -r --watch: run the build here and watch it
-if [ $VIEW -eq 1 ] && [ $RUNWATCH -eq 0 ] && [ $(( RUN + BACKGROUND + ONCE )) -gt 0 ]; then
-  if [ $WATCH -eq 1 ]; then echo "--watch can go with -r (run here and watch). With -b or -o, start the build first, then run: $NAME --watch"
+BGWATCH=0;  [ $WATCH -eq 1 ] && [ $BACKGROUND -eq 1 ] && [ $(( RUN + ONCE )) -eq 0 ] && BGWATCH=1  # -b --watch: start it in the background and watch it
+if [ $VIEW -eq 1 ] && [ $RUNWATCH -eq 0 ] && [ $BGWATCH -eq 0 ] && [ $(( RUN + BACKGROUND + ONCE )) -gt 0 ]; then
+  if [ $WATCH -eq 1 ]; then echo "--watch can go with -r (run here and watch) or -b (run in the background and watch). It cannot go with -o."
   else echo "-s (status) cannot be combined with -r, -b, or -o. Add -v to a run flag to see the state before it starts."; fi
   exit 64
 fi
@@ -978,7 +981,7 @@ watch_header() {
       gate)    echo "${C_Y}$([ $(( tick / 4 % 2 )) -eq 0 ] && echo '●' || echo '○') paused at a review point${C_N}  (run: $(self_cmd) --ready)" ;;
       blocked) echo "${C_R}$([ $(( tick / 4 % 2 )) -eq 0 ] && echo '✖' || echo ' ') stopped, needs you${C_N}  (see the report: $LOG_DIR/report-latest.md)" ;;
       done)    echo "${C_G}✔ build complete${C_N}" ;;
-      *)       echo "${C_D}${sp[tick / 3 % ${#sp[@]}]} no build running (STATUS: ${W_STATUS:-unknown}). Start one: $(self_cmd) -rv${C_N}" ;;
+      *)       if [ "${W_BOOT:-0}" = 1 ]; then echo "${C_G}${sp[tick / 3 % ${#sp[@]}]} starting the build...${C_N}"; else echo "${C_Y}${sp[tick / 3 % ${#sp[@]}]} No build is running.${C_N} ${C_D}(STATUS: ${W_STATUS:-unknown})${C_N}"; fi ;;
     esac
   fi
   # line 2: progress bar and recent activity
@@ -993,25 +996,87 @@ watch_values() {   # refresh the values the header uses
   W_RUN=0; if [ -f "$CURRENT" ] && alive "$LOCK" claude-build; then IFS='|' read -r cs cn cm ce < "$CURRENT"; W_RUN=1; W_START=$cs; W_TASK=$cn; W_MODEL=$cm; fi
 }
 
+# A full redraw of the watch screen with a fixed layout that never scrolls:
+#   rows 1-2  animated header (redrawn by itself several times a second)
+#   row 3     a divider
+#   body      the status report, a divider, then as many recent log lines as still fit
+#   last rows the hints (footer)
+# Long lines are clipped by the terminal (line wrap is switched off while watching), so nothing wraps into another area.
+watch_footer() {   # prints the hint lines
+  echo "${C_D}updated $(date '+%H:%M:%S'). The report refreshes every ${WATCH_EVERY:-5}s. Ctrl+C to quit.${C_N}"
+  [ $was_running -eq 0 ] && [ "$W_RUN" = 0 ] && echo "${C_D}Starting the build...${C_N}"
+  if [ $BGWATCH -eq 1 ]; then echo "${C_D}The build runs in the background. Ctrl+C closes this watch and leaves it running. Stop it with: $(self_cmd) -k${C_N}"; fi
+  if [ -n "$CHILD" ]; then
+    if [ $INTS -ge 1 ]; then echo "${C_Y}Stopping: the build ends after the task it is on. Press Ctrl+C again to stop now.${C_N}"
+    else echo "${C_D}This window is running the build. Ctrl+C stops it after the current task; twice stops it now.${C_N}"; fi
+  fi
+}
+watch_rule() { local w="$1" r=""; r="$(printf '%*s' "$w" '' | tr ' ' '=')"; echo "${C_D}${r}${C_N}"; }
+watch_draw() {
+  local tick="$1" rows cols n_state n_foot room i
+  local -a st ft
+  read -r rows cols <<< "$(term_size)"
+  mapfile -t st < <(show_state nolog)
+  mapfile -t ft < <(watch_footer)
+  n_state=${#st[@]}; n_foot=${#ft[@]}
+  room=$(( rows - 3 - n_foot ))            # rows for the report and the log, below the header and divider
+  [ $room -lt 3 ] && room=3
+  # On a short window drop the "recent tasks" list first, so the log still has room.
+  if [ $(( room - n_state )) -lt 4 ]; then
+    for ((i = 0; i < n_state; i++)); do case "${st[i]}" in *"  recent:"*) st=("${st[@]:0:i}"); n_state=$i; break ;; esac; done
+  fi
+  printf '\033[H'
+  watch_header "$tick" | sed 's/$/\x1b[K/'
+  watch_rule "$cols" | sed 's/$/\x1b[K/'
+  local used=0
+  for ((i = 0; i < n_state && used < room; i++, used++)); do printf '%s\033[K\n' "${st[i]}"; done
+  # recent log lines fill whatever is left, under their own divider
+  if [ $(( room - used )) -ge 3 ] && [ -f "$LOG" ]; then
+    local k=$(( room - used - 1 ))
+    printf '%s\033[K\n' "${C_D}-- recent activity (newest last) --${C_N}"; used=$((used+1))
+    tail -n "$k" "$LOG" | redact_log | tr -d '\000-\010\013-\037' | sed 's/^/  /; s/$/\x1b[K/'
+    used=$(( used + $(tail -n "$k" "$LOG" | wc -l) ))
+  fi
+  printf '\033[J'
+  printf '\033[%d;1H' $(( rows - n_foot + 1 ))
+  for ((i = 0; i < n_foot; i++)); do
+    if [ $i -lt $((n_foot-1)) ]; then printf '%s\033[K\n' "${ft[i]}"; else printf '%s\033[K' "${ft[i]}"; fi
+  done
+}
+
 # -s: print the report and exit. --watch: animated header, with the report redrawn every WATCH_EVERY seconds, until Ctrl+C.
 if [ $VIEW -eq 1 ]; then
   if [ $WATCH -eq 1 ]; then
+    # --watch alone only watches a build that is already running. With nothing running and no run flag there is nothing to show.
+    if [ $RUNWATCH -eq 0 ] && [ $BGWATCH -eq 0 ] && ! alive "$LOCK" claude-build; then
+      echo "${C_Y}${C_B}Nothing will run.${C_N} --watch only watches. No build is running, and you gave no run flag (-r or -b)."
+      echo
+      echo "To run a build here and watch it:         $(self_cmd) -rv --watch"
+      echo "To run it in the background and watch it: $(self_cmd) -b --watch"
+      echo "To see the state without watching:        $(self_cmd) -s"
+      exit 64
+    fi
     [ -t 1 ] || { echo "--watch needs a terminal."; exit 64; }
-    CHILD=""; INTS=0; runlog=""
-    if [ $RUNWATCH -eq 1 ]; then
+    CHILD=""; INTS=0; runlog=""; wpass=()
+    if [ $RUNWATCH -eq 1 ] || [ $BGWATCH -eq 1 ]; then
       if alive "$LOCK" claude-build; then echo "A build is already running for this project (pid $(cat "$LOCK")). Watch it with: $(self_cmd) --watch"; exit 0; fi
       mkdir -p "$LOG_DIR"; runlog="$(proj_path "$LOG_DIR")/watch-run.log"
-      wpass=(); for a in "${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}"; do case "$a" in --watch|-v|-V|--verbose|--very-verbose|-r|--run) ;; *) wpass+=("$a") ;; esac; done
+      for a in "${ORIG_ARGS[@]+"${ORIG_ARGS[@]}"}"; do case "$a" in --watch|-v|-V|--verbose|--very-verbose|-r|--run|-b|--background) ;; *) wpass+=("$a") ;; esac; done
+    fi
+    if [ $RUNWATCH -eq 1 ]; then
       ( cd "$ORIG_PWD" && exec "$SCRIPT_PATH" "${wpass[@]+"${wpass[@]}"}" -r ) > "$runlog" 2>&1 < /dev/null &
       CHILD=$!
       # Ctrl+C once: stop after the task in progress. Twice: stop now. The build runs as a child of this window.
       trap 'INTS=$((INTS+1)); if [ $INTS -eq 1 ]; then touch "$STOP"; else kill_tree TERM "$CHILD"; fi' INT
-      trap 'kill_tree TERM "$CHILD"; printf "\033[?25h\n"; exit 0' TERM
+      trap 'kill_tree TERM "$CHILD"; printf "\033[?7h\033[?25h\n"; exit 0' TERM
     else
-      trap 'printf "\033[?25h\n"; exit 0' INT TERM
+      # -b --watch starts the build in the background, so closing this window leaves it running.
+      [ $BGWATCH -eq 1 ] && ( cd "$ORIG_PWD" && "$SCRIPT_PATH" "${wpass[@]+"${wpass[@]}"}" -b ) > "$runlog" 2>&1 < /dev/null
+      trap 'printf "\033[?7h\033[?25h\n"; exit 0' INT TERM
     fi
-    printf '\033[?25l\033[2J'
-    W_RUN=0; W_START=0; W_TASK=""; W_MODEL=""; W_STATUS=""; W_DONE=0; W_TOTAL=0; W_LEVELS="0"
+    printf '\033[?25l\033[?7l\033[2J'   # hide the cursor, switch line wrap off, clear the screen
+    REDRAW=0; trap 'REDRAW=1' WINCH
+    W_BOOT=0; [ $RUNWATCH -eq 1 ] || [ $BGWATCH -eq 1 ] && W_BOOT=1; W_RUN=0; W_START=0; W_TASK=""; W_MODEL=""; W_STATUS=""; W_DONE=0; W_TOTAL=0; W_LEVELS="0"
     tick=0; every=$(( ${WATCH_EVERY:-5} * 5 )); [ $every -lt 5 ] && every=5; was_running=0; miss=0; watch_start=$(date +%s)
     while true; do
       # Once a second: is a build running? Before one has been seen, wait up to WATCH_WAIT seconds (default 30) for it to start.
@@ -1025,10 +1090,8 @@ if [ $VIEW -eq 1 ]; then
           elif [ $(( $(date +%s) - watch_start )) -ge "${WATCH_WAIT:-30}" ]; then break; fi
         fi
       fi
-      if [ $(( tick % every )) -eq 0 ]; then
-        watch_values
-        printf '\033[H'; watch_header "$tick"; echo; show_state; echo; echo "updated $(date '+%H:%M:%S'), report refreshes every ${WATCH_EVERY:-5}s. Ctrl+C to quit"; [ $was_running -eq 0 ] && [ "$W_RUN" = 0 ] && echo "${C_D}Waiting up to ${WATCH_WAIT:-30}s for a build to start...${C_N}"
-        if [ -n "$CHILD" ]; then if [ $INTS -ge 1 ]; then echo "${C_Y}Stopping: the build ends after the task it is on. Press Ctrl+C again to stop now.${C_N}"; else echo "${C_D}This window is running the build. Ctrl+C stops it after the current task; twice stops it now.${C_N}"; fi; fi; printf '\033[J'
+      if [ $(( tick % every )) -eq 0 ] || [ "$REDRAW" = 1 ]; then
+        REDRAW=0; watch_values; watch_draw "$tick"
       else
         printf '\033[1;1H'; watch_header "$tick" | sed 's/$/\x1b[K/'
       fi
@@ -1040,8 +1103,8 @@ if [ $VIEW -eq 1 ]; then
       wait "$CHILD" 2>/dev/null
     fi
     # The build is not running (or never was). Leave a final, still picture and return to the shell.
-    watch_values; W_RUN=0
-    printf '\033[H\033[2J'; watch_header "$tick"; echo
+    watch_values; W_RUN=0; W_BOOT=0
+    printf '\033[?7h\033[H\033[2J'; watch_header "$tick"; watch_rule "$(term_size | cut -d' ' -f2)"
     if [ $was_running -eq 1 ]; then show_state; else show_state nolog; fi; echo
     if [ -n "$CHILD" ]; then
       # The build was started by this window. Its own summary (what happened and what to do next) is in its output file.
@@ -1057,11 +1120,11 @@ if [ $VIEW -eq 1 ]; then
         *)       echo; echo "To start it again: $(self_cmd) -rv" ;;
       esac
     else
-      echo "No build started while the watch waited (${WATCH_WAIT:-30}s), so there was nothing to watch. The log above is from before; it does not describe this moment."
+      if [ $BGWATCH -eq 1 ]; then echo "${C_B}The build did not start.${C_N} Its output:"; tail -n 12 "$runlog" 2>/dev/null | sed 's/^/  /'
+      else echo "${C_B}The build ended before the watch could show it.${C_N} See: $(self_cmd) -s"; fi
       [ -f "$STOP" ] && echo "A stop request from $(date -r "$STOP" '+%H:%M' 2>/dev/null) is still in $(proj_path "$STOP"). Starting a build removes it."
-      echo "Start one: $(self_cmd) -rv   (or -b, then --watch)"
     fi
-    printf '\033[?25h'; exit 0
+    printf '\033[?7h\033[?25h'; exit 0
   fi
   show_state; exit 0
 fi
@@ -1167,7 +1230,7 @@ tool_mark() {
 }
 tool_ticker() {
   if [ "$VERBOSE" -ge 2 ] || [ -z "$C_N" ]; then cat; return; fi
-  awk -v w="$(tput cols 2>/dev/null || echo 100)" '
+  awk -v w="$(term_size | cut -d' ' -f2)" '
     { if (substr($0, 1, 1) == "\001") { l = substr($0, 2); gsub(/\033\[[0-9;]*m/, "", l); printf "\r\033[2K\033[2m  … %s\033[0m", substr(l, 1, w - 6); shown = 1; fflush(); next }
       if (shown) { printf "\r\033[2K"; shown = 0 }
       print; fflush() }

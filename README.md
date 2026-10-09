@@ -344,9 +344,16 @@ claude-build -c ~/builds/blog.conf -s
 
 #### `--watch`
 
-Status that stays up to date. Run it in a second terminal while a build works. It shows an animated header over the same report as `-s`, and redraws the report every 5 seconds until you press Ctrl+C (change the interval with `WATCH_EVERY=2 claude-build --watch`, or `WATCH_EVERY` in the config). It needs a terminal and cannot be combined with a run flag.
+A live dashboard for a running build. It has an animated header over the same report as `-s`, and it redraws the report every 5 seconds until you press Ctrl+C (change the interval with `WATCH_EVERY=2`, or `WATCH_EVERY` in the config). It needs a terminal.
 
-`--watch` follows the build to its end. When the build stops (it finished, reached a review point, was blocked, or was stopped with `-k` or `--kill-now`), the watch leaves its last picture on the screen, prints how the build ended and what to do next, and returns you to the shell prompt. If no build is running when you start it, it says so and exits.
+`--watch` only watches. It never starts a build by itself, so it needs either a build that is already running or a run flag:
+
+| You run | What happens |
+| --- | --- |
+| `claude-build -c blog.conf -rv --watch` | Starts the build in this window and shows the dashboard. Ctrl+C once stops the build after the task it is on, and twice stops it now. When the build ends, the window prints the build's own summary and what to do next, then returns to the shell |
+| `claude-build -c blog.conf -b --watch` | Starts the build in the background and shows the dashboard. Ctrl+C closes only the dashboard. The build keeps running, and `-k` stops it |
+| `claude-build -c blog.conf --watch` | Watches a build that is already running (started with `-b` or in another window). When it stops (finished, reached a review point, blocked, or stopped with `-k`), the dashboard leaves its last picture on screen and returns to the shell |
+| `claude-build -c blog.conf --watch` with nothing running | Prints "Nothing will run. --watch only watches..." with the commands above, and exits. It does not draw a dashboard |
 
 ```
 ⠹ ▒▓█▓▒░······················  working on task 2.2 (sonnet) 4m12s
@@ -357,14 +364,12 @@ inform9 build
   ...
 ```
 
-- **Top line:** while a run is working, a bright block sweeps back and forth with a trail and a spinner turns, and the elapsed time counts up, so you can see at a glance that the display is live. When nothing is running it shows the state instead: a pulsing `●` at a review point, a blinking `✖` when stopped and needing you, `✔` when complete, or a quiet "no build running" with the command to start one.
-- **Second line:** a progress bar with the task count, and a sparkline of the build's activity over the last 20 minutes, one bar per minute, drawn from the steps in the log. A flat line during a run means the model is thinking or waiting; tall bars mean it is reading, editing, and running commands.
+- **Layout:** the two header lines stay pinned at the top of the window, under them is a divider (`=====`), then the status report, a second divider (`-- recent activity --`) and the newest log lines, and the hints on the last row. The screen never scrolls, so log text cannot cover the header. Long lines are clipped at the window edge, the log shrinks to fit the window height, and a resize redraws it.
+- **Top line:** while a run is working, a bright block sweeps back and forth with a trail and a spinner turns, and the elapsed time counts up. When nothing is running it shows the state: a pulsing `●` at a review point, a blinking `✖` when stopped and needing you, or `✔` when complete.
+- **Second line:** a progress bar with the task count, and a sparkline of the build's activity over the last 20 minutes, one bar per minute, drawn from the steps in the log. A flat line during a run means the model is thinking or waiting.
 - **The report below:** status, next task, how long the current run has been going, files changed, saved snapshots, recent tasks, and the end of the log.
-- **No Unicode?** On a terminal that is not UTF-8, it uses plain characters (`|/-\`, `#`, `.`).
-
-```
-claude-build -c blog.conf --watch
-```
+- **No Unicode?** On a terminal that is not UTF-8, it uses plain characters.
+- It cannot be combined with `-o`.
 
 #### `-v`, `--verbose`, `-V`, `--very-verbose`
 
@@ -549,7 +554,7 @@ claude-build -d ~/Workspace/blog -S docs/PROGRESS.md -i docs/ -r      no config 
 | -r | --run | off |
 | -o | --once | off |
 | -s | --status | off |
-| | --watch | off. Status that redraws every 5 seconds |
+| | --watch | off. Live dashboard. Needs a running build, or -r or -b |
 | -v | --verbose | off |
 | -V | --very-verbose | off. Every step, including reads and searches |
 | -b | --background | off |
