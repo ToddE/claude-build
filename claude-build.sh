@@ -48,6 +48,8 @@ GATE_MODE="stop"       # stop = a GATE row pauses the build. continue = record i
 REPORT=1               # 1 = at every stop, write a report file and have a model explain it in plain words. 0 = report without the explanation
 REPORT_MODEL="sonnet"  # model that writes the plain-words explanation (one short call per stop)
 REPORT_EFFORT="low"
+SNAPSHOT_EVERY=60      # seconds between automatic snapshots of unfinished work while a run is going. 0 = off
+SNAPSHOT_KEEP=60       # how many snapshots to keep
 STREAM=1               # 1 = log and show progress while a run works (needs jq). 0 = output appears when the run ends
 REDACT_FILES=(".env.local")
 CONFIG=""              # chosen below: -c, else ./claude-build.conf in the current folder, else the one beside this script
@@ -448,6 +450,11 @@ build_prompt() {
   p="$p When you stop at a gate or a stop condition, write the Notes cell of that row and your final message for a person who has not read the planning files. Spell out any code name (a milestone id, a gate id, a spike) in a few plain words. Say what was built, what you want checked, the full path of each file to open, what a correct result looks like, and what to do if it is wrong. The exact edit that continues the build is in ${STATE_FILE}: change STATUS: gate to STATUS: ready. Do not end with a recommendation alone."
   # A person can ask the build to stop with -k or by creating this file. The loop only looks between runs, and a run can hold several tasks, so the model checks too.
   p="$p Before you start each task after the first in this run, check whether the file ${LOG_DIR}/stop exists (use ls, or Read). If it exists, finish and commit the task you are on, then stop. Do not start another task."
+  # Files left by a run that was stopped or failed: tell the next session so it neither ignores nor throws them away.
+  local dirty; dirty="$(git status --short 2>/dev/null | wc -l)"
+  if [ "${dirty:-0}" -gt 0 ]; then
+    p="$p Note: the project has $dirty uncommitted files, probably from an earlier run that was stopped. Before you start the NEXT task, look at them (git status, git diff). Reuse what is correct for the task and replace what is not. Do not delete files you did not create in this run."
+  fi
   printf '%s' "$p"
 }
 
@@ -836,6 +843,34 @@ finish_build() {
   echo
 }
 
+# Saves the working tree (changed and new files, not ignored ones) as a commit that is NOT on any branch, under
+# refs/claude-build/rescue/. The working tree, the index, and the branch are untouched. Used when a run stops
+# before the model committed. $1 = why, $2 = quiet to write only to the log.
+rescue_work() {
+  [ -d .git ] || return 0
+  [ -n "$(git status --porcelain 2>/dev/null | head -n 1)" ] || return 0
+  local idx tree last stamp ref commit n keep="${SNAPSHOT_KEEP:-60}"; local -a ident=()
+  idx="$(mktemp -u "${TMPDIR:-/tmp}/claude-build-index.XXXXXX")"
+  [ -f .git/index ] && cp .git/index "$idx" 2>/dev/null
+  tree="$(GIT_INDEX_FILE="$idx" git add -A >/dev/null 2>&1 && GIT_INDEX_FILE="$idx" git write-tree 2>/dev/null)"; rm -f "$idx"
+  [ -n "$tree" ] || return 0
+  last="$(git for-each-ref --count=1 --sort=-creatordate --format='%(objectname)' refs/claude-build/rescue 2>/dev/null)"
+  if [ -n "$last" ] && [ "$(git rev-parse "$last^{tree}" 2>/dev/null)" = "$tree" ]; then return 0; fi   # nothing new since the last snapshot
+  git config user.name >/dev/null 2>&1 || ident=(-c user.name=claude-build -c user.email=claude-build@localhost)
+  stamp="$(date +%Y%m%d-%H%M%S)"; ref="refs/claude-build/rescue/$stamp"
+  commit="$(git "${ident[@]+"${ident[@]}"}" commit-tree "$tree" -p HEAD -m "claude-build rescue: $1" 2>/dev/null)" || return 0
+  git update-ref "$ref" "$commit" 2>/dev/null || return 0
+  n="$(git status --porcelain | wc -l)"
+  git for-each-ref --sort=-creatordate --format='%(refname)' refs/claude-build/rescue | tail -n +$((keep+1)) | while read -r old; do git update-ref -d "$old"; done
+  local msg="saved unfinished work ($n files) as $ref ($1). See it: git diff HEAD $ref --stat. Restore a file: git checkout $ref -- PATH"
+  if [ "${2:-}" = quiet ]; then echo "$(date -Is) $msg" >> "$LOG"; else log_msg "$msg"; fi
+  return 0
+}
+# Takes a snapshot every SNAPSHOT_EVERY seconds while a run is going, so a crash, a power loss, or a kill loses at most that much.
+snapshotter() { while true; do sleep "$SNAPSHOT_EVERY"; rescue_work "automatic snapshot during a run" quiet; done; }
+SNAP_PID=""
+stop_snapshotter() { [ -n "$SNAP_PID" ] && { kill "$SNAP_PID" 2>/dev/null; wait "$SNAP_PID" 2>/dev/null; SNAP_PID=""; }; return 0; }
+
 # Sends a signal to a process and everything it started, children first.
 kill_tree() { local c; for c in $(pgrep -P "$2" 2>/dev/null); do kill_tree "$1" "$c"; done; kill "-$1" "$2" 2>/dev/null; return 0; }
 
@@ -858,8 +893,10 @@ if [ $STOPIT -eq 1 ]; then
       kill_tree TERM "$pid"
       for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
       kill -0 "$pid" 2>/dev/null && kill_tree KILL "$pid"
-      rm -f "$STOP" "$CURRENT"
-      if [ $NOW -eq 1 ]; then echo "stopped at once. Any task in progress stays todo and repeats on the next run. Check git status for files it left."
+      rm -f "$STOP"
+      [ -f "$CURRENT" ] && rescue_work "stopped with --kill-now"
+      rm -f "$CURRENT"
+      if [ $NOW -eq 1 ]; then echo "stopped at once. The task in progress stays todo and repeats on the next run. Its unfinished files are still in the working tree, and a copy is saved under refs/claude-build/rescue (see --watch or git for-each-ref refs/claude-build/rescue)."
       else echo "stopped. No run was in progress, so nothing was lost."; fi
     fi
   else echo "Nothing is running for $PROJECT_NAME."; fi
@@ -883,6 +920,9 @@ show_state() {
     echo "  this run:   task $cn on $cm, effort $ce, running for $(( el/60 ))m $(printf '%02d' $(( el%60 )))s"
   fi
   echo "  tasks:      $done_n of $total done"
+  if [ -d .git ]; then local rn rl; rn="$(git for-each-ref refs/claude-build/rescue 2>/dev/null | wc -l)"
+    [ "$rn" -gt 0 ] && { rl="$(git for-each-ref --count=1 --sort=-creatordate --format='%(refname:lstrip=3) (%(creatordate:relative))' refs/claude-build/rescue)"; echo "  snapshots:  $rn saved copies of unfinished work, latest $rl"; }
+  fi
   if [ -d .git ]; then echo "  changes:    $(git status --short 2>/dev/null | wc -l) uncommitted files. Last commit: $(git log -1 --format='%h %s' 2>/dev/null | cut -c1-70)"; fi
   table_warnings | sed 's/^/  /'
   rd=$(recent_done 5); if [ -n "$rd" ]; then echo "  recent:"; while IFS='|' read -r i t; do echo "    $i  $t"; done <<< "$rd"; fi
@@ -948,7 +988,7 @@ if [ $VERBOSE -ge 1 ]; then show_state nolog; echo; fi
 mkdir -p "$LOG_DIR"
 if alive "$LOCK" claude-build; then echo "already running (pid $(cat "$LOCK"))"; exit 0; fi
 echo $$ > "$LOCK"
-cleanup() { stop_spinner; rm -f "$LOCK" "$CURRENT"; log_msg "stopped"; }
+cleanup() { stop_spinner; stop_snapshotter; [ -f "$CURRENT" ] && rescue_work "the build was interrupted"; rm -f "$LOCK" "$CURRENT"; log_msg "stopped"; }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 rm -f "$STOP"
@@ -1034,6 +1074,7 @@ resume_build() {
   echo "$(date +%s)|$(state NEXT)|$RUN_MODEL|${RUN_EFFORT:-default}" > "$CURRENT"
   # Spinner: a foreground run on a terminal. Not with -v, which prints progress lines itself.
   if [ -t 2 ] && [ $VERBOSE -eq 0 ]; then spinner "$(state NEXT)" "$RUN_MODEL" & SPIN_PID=$!; fi
+  if [ "${SNAPSHOT_EVERY:-0}" -gt 0 ] && [ -d .git ]; then snapshotter & SNAP_PID=$!; fi
   if [ "$STREAM" -eq 1 ] && command -v jq >/dev/null 2>&1; then
     # Progress while the run works. The raw stream is kept in LOG_DIR/last-run.jsonl.
     OUT_FORMAT=stream-json; cmd=(); while IFS= read -r -d '' a; do cmd+=("$a"); done < <(claude_args)
@@ -1047,7 +1088,7 @@ resume_build() {
   else
     timeout --foreground "$TIMEOUT" "$CLAUDE_BIN" "${cmd[@]}" >> "$LOG" 2>&1; code=$?
   fi
-  stop_spinner; rm -f "$CURRENT"
+  stop_spinner; stop_snapshotter; rm -f "$CURRENT"
   if [ "$STREAM" -eq 1 ] && command -v jq >/dev/null 2>&1 && [ -f "$LOG_DIR/last-run.jsonl" ]; then
     local c; c="$(jq -Rr 'fromjson? | select(.type=="result") | .total_cost_usd // empty' "$LOG_DIR/last-run.jsonl" 2>/dev/null | tail -n 1)"
     [ -n "$c" ] && printf '%s %s\n' "$(date +%s)" "$c" >> "$LOG_DIR/costs.tsv"
@@ -1058,6 +1099,7 @@ resume_build() {
     wait=${BACKOFF_STEPS[$idx]}
     echo $(( $(date +%s) + wait )) > "$BACKOFF"
     log_msg "run failed (code $code). Backing off $(( wait/60 )) min"
+    rescue_work "the run failed with code $code"
     return $code
   fi
   rm -f "$FAILS" "$BACKOFF"; log_msg "run finished"; return 0
@@ -1091,6 +1133,7 @@ while true; do
       if [ "$done_after" = "$done_n" ] && [ "$(state NEXT)" = "$next" ] && [ "$(state STATUS)" = "ready" ]; then
         NO_PROGRESS=$(( NO_PROGRESS + 1 ))
         log_msg "no task finished in that run ($NO_PROGRESS of 2 allowed)"
+        rescue_work "a run ended without finishing a task"
         if [ $NO_PROGRESS -ge 2 ]; then
           reason="Two runs finished without completing a task. See $LOG."; reason=${reason//\\/\\\\}; reason=${reason//&/\\&}; reason=${reason//|/\\|}
           sed -i "s|^STATUS:.*|STATUS: blocked|; s|^BLOCKED_REASON:.*|BLOCKED_REASON: $reason|" "$STATE_FILE"

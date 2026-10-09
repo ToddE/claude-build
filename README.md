@@ -720,6 +720,28 @@ log, last 15 lines (/home/you/project/.build/build.log):
 
 A block (`STATUS: blocked`) prints the same kind of summary with the reason.
 
+### When work is committed, and the safety snapshots
+
+The script never commits. The model does: each run is told to update the state file and commit after every task. So work in a task that is still in progress is not in git, and a stop, a crash, a usage limit, or a power loss could lose it.
+
+To protect that work the build saves snapshots of unfinished work. A snapshot is a commit that is not on any branch, stored under `refs/claude-build/rescue/`. It holds your changed and new files (not files in `.gitignore`). Your branch, your history, your index, and your working tree are not touched. Snapshots are taken:
+
+- every `SNAPSHOT_EVERY` seconds (default 60) while a run is going, if anything changed. This uses no tokens: it is a few `git` commands run by the script, and it stores only what changed
+- when a run fails (usage limit, timeout, error)
+- when a run ends without finishing a task
+- when the build is interrupted with Ctrl+C
+- when you stop it with `--kill-now`
+
+The newest `SNAPSHOT_KEEP` (default 60) are kept. `claude-build -s` and `--watch` show how many exist.
+
+```
+git for-each-ref refs/claude-build/rescue                    list them, newest last
+git diff HEAD refs/claude-build/rescue/20261008-225133 --stat    what a snapshot holds compared to now
+git checkout refs/claude-build/rescue/20261008-225133 -- path/to/file    bring one file back
+```
+
+The next run is also told that uncommitted files are in the project, and to look at them before it starts the next task. Set `SNAPSHOT_EVERY=0` to turn the automatic snapshots off. Large new files that are not ignored are saved too, so keep build output in `.gitignore`.
+
 ### The handoff report
 
 The aim is for the build to go as far as it can and then tell you, in plain words, what happened and what to do. Whenever the build stops because of a gate, a block, or completion, the script writes a report and prints a summary:
