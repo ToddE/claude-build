@@ -446,6 +446,8 @@ build_prompt() {
   p="${p//\{state_file\}/$STATE_FILE}"; p="${p//\{tasks_per_run\}/$TASKS_PER_RUN}"; p="${p//\{context\}/$ctx}"
   # Always added: tells the model how to end a run at a gate or a stop, so the person knows what to do.
   p="$p When you stop at a gate or a stop condition, write the Notes cell of that row and your final message for a person who has not read the planning files. Spell out any code name (a milestone id, a gate id, a spike) in a few plain words. Say what was built, what you want checked, the full path of each file to open, what a correct result looks like, and what to do if it is wrong. The exact edit that continues the build is in ${STATE_FILE}: change STATUS: gate to STATUS: ready. Do not end with a recommendation alone."
+  # A person can ask the build to stop with -k or by creating this file. The loop only looks between runs, and a run can hold several tasks, so the model checks too.
+  p="$p Before you start each task after the first in this run, check whether the file ${LOG_DIR}/stop exists (use ls, or Read). If it exists, finish and commit the task you are on, then stop. Do not start another task."
   printf '%s' "$p"
 }
 
@@ -847,7 +849,7 @@ if [ $STOPIT -eq 1 ]; then
       IFS='|' read -r cs cn cm ce < "$CURRENT"; el=$(( $(date +%s) - cs ))
       echo "${C_B}Stop requested.${C_N} The build will stop when the run in progress finishes."
       echo "  Running now:  task $cn on $cm, effort $ce, for $(( el/60 ))m $(printf '%02d' $(( el%60 )))s"
-      echo "  What happens: the model finishes and commits its tasks, then the loop exits. A run can take a while; this keeps its work."
+      echo "  What happens: the model is told to check for the stop request between tasks, so it stops after the task it is on is committed. If it does not, the loop exits when the run ends. This keeps its work."
       echo "  Watch it:     $(self_cmd) --watch"
       echo "  Stop at once: ${C_C}$(self_cmd) --kill-now${C_N}   (the task in progress stays todo, and its files are left uncommitted)"
       echo "  Changed your mind: rm $(proj_path "$STOP")"
